@@ -1291,8 +1291,12 @@ fn sys_mmap(c: &mut Context<'_>, a: [u64; 6]) -> Outcome {
             if let Some(file) = &file
                 && let Some(d) = &descriptor
                 && let Err(error) = file_cache(c, d, file).and_then(|cache| {
-                    c.mem
-                        .back_with_cache(a, len, &cache.map_private(file), offset)
+                    c.mem.back_with_cache(
+                        a,
+                        len,
+                        &cache.map_private(file, crate::files::mapped_path(c, d)),
+                        offset,
+                    )
                 })
             {
                 let _ = c.mem.unmap_shared(a, len);
@@ -1381,7 +1385,13 @@ fn share_file(
         return Err(Errno::EPERM);
     }
     let may_write = file.flags() & 3 == 2 && !write_sealed(file.as_ref());
-    let pages = file_cache(c, d, file)?.map(file, offset, len, may_write)?;
+    let pages = file_cache(c, d, file)?.map(
+        file,
+        crate::files::mapped_path(c, d),
+        offset,
+        len,
+        may_write,
+    )?;
     c.mem.share_pages(at, len, &pages, offset, may_write)
 }
 /// The page cache of the file `d` holds, which keeps its size.
