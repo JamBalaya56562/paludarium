@@ -638,9 +638,11 @@ kernel.
     it otherwise, but the first page of a file mapping from the start of an
     ELF file; a shared mapping is there whole when no name links its file
     (an anonymous one, a memfd, a file unlinked since), and nothing of it
-    otherwise. `wait` then reports `CLD_DUMPED` and the core flag. A
-    core larger than the limit is cut there and still reported as dumped, as
-    Linux reports a core once it has started to write it.
+    otherwise. Whether a mapping can be read matters only for that ELF
+    header's page: Linux reads the others whatever their protection.
+    `wait` then reports `CLD_DUMPED` and the core flag. A core larger than
+    the limit is cut there and still reported as dumped, as Linux reports a
+    core once it has started to write it.
 
   Process groups and sessions are kept the same way, and `wait4` and
   `waitid` can wait for a group. The first process's session started outside
