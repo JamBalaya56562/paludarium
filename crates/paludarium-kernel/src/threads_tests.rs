@@ -1,4 +1,5 @@
 use super::*;
+use crate::credentials::SignalIds;
 use paludarium_mmu::{MappingKind, Prot};
 use paludarium_types::{Errno, GuestAddr};
 use std::sync::atomic::Ordering;
@@ -16,7 +17,7 @@ fn timer_receipt_survives_process_dispatch_and_owner_acknowledges_kind() {
     assert!(!inbox.wake_token().load(Ordering::SeqCst));
     inbox.timer_changed();
     inbox.interrupt();
-    inbox.send_thread(10).unwrap();
+    inbox.send_thread(10, 0).unwrap();
     inbox.drain_process(&mut other);
     let receipt = inbox.drain(&mut other);
     assert!(receipt.timer_changed && receipt.interrupted && receipt.signals);
@@ -28,7 +29,7 @@ fn timer_receipt_survives_process_dispatch_and_owner_acknowledges_kind() {
         scope.spawn(move || {
             ack_rx.recv().unwrap();
             inbox.timer_changed();
-            inbox.send_thread(12).unwrap();
+            inbox.send_thread(12, 0).unwrap();
         });
         ack_tx.send(()).unwrap();
     });
@@ -63,7 +64,7 @@ fn preentry_timer_metadata_keeps_sleep_deadline_but_real_interrupt_wins() {
         match mode {
             2 => {
                 t.state.signal_mask = 1 << 9;
-                inbox.send_thread(10).unwrap();
+                inbox.send_thread(10, 0).unwrap();
             }
             3 => {
                 t.state.signal_actions.insert(
@@ -73,7 +74,7 @@ fn preentry_timer_metadata_keeps_sleep_deadline_but_real_interrupt_wins() {
                         ..SignalAction::default()
                     },
                 );
-                inbox.send_thread(10).unwrap();
+                inbox.send_thread(10, 0).unwrap();
             }
             4 => k.group.stop(ExitStatus::Signaled(9)),
             _ => {}
@@ -203,6 +204,26 @@ fn clear_child_tid_on_finish() {
     assert_eq!(k.group.active_threads(), 1);
 }
 #[test]
+fn a_finished_thread_leaves_no_signal_ids_behind() {
+    let mut k = kernel();
+    let mut t = thread();
+    let m = memory();
+    clone(&mut k, &mut t, &m, 0x10900);
+    let (mut child, ct) = k.take_child().unwrap();
+    let pid = k.process.pid;
+    let leader = k.group.signal_ids(pid, pid);
+    let other = SignalIds {
+        uid: 2000,
+        euid: 2000,
+        suid: 2000,
+        cap_kill: false,
+    };
+    k.group.set_signal_ids(ct.tid, other);
+    assert_eq!(k.group.signal_ids(pid, ct.tid), other);
+    child.finish_thread(&ct, &m);
+    assert_eq!(k.group.signal_ids(pid, ct.tid), leader);
+}
+#[test]
 fn individual_exit_does_not_stop_group() {
     let mut k = kernel();
     let mut t = thread();
@@ -318,7 +339,7 @@ fn process_dispatch_does_not_steal_initial_thread_signal() {
     let inbox = Arc::new(SignalInbox::default());
     let k = kernel().with_signal_inbox(inbox.clone());
     let mut child = ThreadState::default();
-    inbox.send_thread(36).unwrap();
+    inbox.send_thread(36, 0).unwrap();
     inbox.send(35).unwrap();
     k.group.drain_process(&mut child);
     assert_eq!(child.pending.len(), 1);
