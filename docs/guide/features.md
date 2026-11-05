@@ -18,14 +18,19 @@ Linux.
   cryptographic instructions such as AES, PCLMUL and SHA. Floating point is
   computed in software.
 - Instructions are decoded with [iced-x86](https://github.com/icedland/iced).
-- `CPUID` does not reveal the host's values and does not advertise features
-  that are not implemented.
+- `CPUID` does not reveal the host's values. It names AMD as the vendor, because
+  glibc reads the features only for a vendor it knows, and reports the features
+  every x86-64 CPU has, because glibc requires them. Of those, the FPU and MMX
+  are not implemented; it advertises no other feature that is not. The name
+  changes nothing else: where vendors' CPUs differ, as in the flags after a
+  `REP` faults, the virtual CPU keeps its own behaviour.
 - `RDTSC` and `RDTSCP` read a counter of the virtual CPU, which moves on with
   each read rather than with time. Every guest in the host process shares that
   counter, so its values depend on what else has read it. `RDSSP` does nothing,
   as there are no shadow stacks. `FXSAVE` and `FXRSTOR` keep MXCSR and the XMM registers, and give the
   x87 state as it is after a reset.
-- AVX, AVX-512, x87 and MMX are out of scope.
+- x87 is not implemented yet. AVX, AVX-512 and MMX are out of scope: `CPUID`
+  reports MMX because glibc requires it, but its instructions stop with `SIGILL`.
 
 When a guest reaches an instruction it cannot run, it gets `SIGILL`, as on real
 Linux. Page faults raise `SIGSEGV`, and integer division by zero `SIGFPE`.
