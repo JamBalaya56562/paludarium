@@ -221,12 +221,21 @@ jobs:
         # Retried: static.rust-lang.org downloads sometimes fail on CI.
         uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: ./.github/actions/guest-toolchain
+        with:
+          packages: musl-tools
       # The core-dump differential case needs Linux to write a core to the
       # working directory, as the kernel's default core_pattern does; the
       # runner hands cores to its crash handler instead.
+      # Linux's default soft limit on them is 0, as a guest's is, but the runner
+      # of Ubuntu 26.04 raises it for the steps it starts. Later steps are children
+      # of this step's parent, the runner's worker, and take the limit from it.
       - name: Write cores to the working directory
-        run: sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+        run: |
+          sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+          sudo prlimit --pid "$PPID" --core=0:
+      - name: Check that this step took the core limit
+        run: test "$(ulimit -Sc)" = 0
       # The AF_UNIX datagram case fills a queue to the kernel's default
       # net.unix.max_dgram_qlen, which the runner's systemd raises.
       - name: Keep the default AF_UNIX datagram queue length
@@ -270,12 +279,21 @@ jobs:
         # Retried: static.rust-lang.org downloads sometimes fail on CI.
         uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: ./.github/actions/guest-toolchain
+        with:
+          packages: musl-tools
       # The core-dump differential case needs Linux to write a core to the
       # working directory, as the kernel's default core_pattern does; the
       # runner hands cores to its crash handler instead.
+      # Linux's default soft limit on them is 0, as a guest's is, but the runner
+      # of Ubuntu 26.04 raises it for the steps it starts. Later steps are children
+      # of this step's parent, the runner's worker, and take the limit from it.
       - name: Write cores to the working directory
-        run: sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+        run: |
+          sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+          sudo prlimit --pid "$PPID" --core=0:
+      - name: Check that this step took the core limit
+        run: test "$(ulimit -Sc)" = 0
       # The AF_UNIX datagram case fills a queue to the kernel's default
       # net.unix.max_dgram_qlen, which the runner's systemd raises.
       - name: Keep the default AF_UNIX datagram queue length

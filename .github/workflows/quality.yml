@@ -356,12 +356,21 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 'latest'
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: ./.github/actions/guest-toolchain
+        with:
+          packages: musl-tools
       # The core-dump differential case needs Linux to write a core to the
       # working directory, as the kernel's default core_pattern does; the
       # runner hands cores to its crash handler instead.
+      # Linux's default soft limit on them is 0, as a guest's is, but the runner
+      # of Ubuntu 26.04 raises it for the steps it starts. Later steps are children
+      # of this step's parent, the runner's worker, and take the limit from it.
       - name: Write cores to the working directory
-        run: sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+        run: |
+          sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+          sudo prlimit --pid "$PPID" --core=0:
+      - name: Check that this step took the core limit
+        run: test "$(ulimit -Sc)" = 0
       # The AF_UNIX datagram case fills a queue to the kernel's default
       # net.unix.max_dgram_qlen, which the runner's systemd raises.
       - name: Keep the default AF_UNIX datagram queue length
@@ -406,12 +415,21 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 'latest'
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: ./.github/actions/guest-toolchain
+        with:
+          packages: musl-tools
       # The core-dump differential case needs Linux to write a core to the
       # working directory, as the kernel's default core_pattern does; the
       # runner hands cores to its crash handler instead.
+      # Linux's default soft limit on them is 0, as a guest's is, but the runner
+      # of Ubuntu 26.04 raises it for the steps it starts. Later steps are children
+      # of this step's parent, the runner's worker, and take the limit from it.
       - name: Write cores to the working directory
-        run: sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+        run: |
+          sudo sysctl -w kernel.core_pattern=core kernel.core_uses_pid=0
+          sudo prlimit --pid "$PPID" --core=0:
+      - name: Check that this step took the core limit
+        run: test "$(ulimit -Sc)" = 0
       # The AF_UNIX datagram case fills a queue to the kernel's default
       # net.unix.max_dgram_qlen, which the runner's systemd raises.
       - name: Keep the default AF_UNIX datagram queue length
@@ -548,7 +566,9 @@ jobs:
           install_args: aqua:taiki-e/cargo-llvm-cov
           cache: false
       - run: cargo llvm-cov --locked -p paludarium-jit --all-features --lib --fail-under-lines 80 --lcov --output-path target/jit.lcov
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: ./.github/actions/guest-toolchain
+        with:
+          packages: musl-tools
       - name: Record native architectural profile
         run: |
           mkdir -p target/encodings-guests
