@@ -19,18 +19,59 @@ runs:
         DEBIAN_FRONTEND: noninteractive
         NEEDRESTART_SUSPEND: "1"
       run: |
+        # The Azure mirror sometimes serves one job at 40 kB/s while another job of the same run
+        # gets 45 MB/s from it, and apt stays on it until the job times out. So bound the download
+        # (not the install: stopping dpkg would leave packages half installed) and fall back to
+        # the other mirrors. Each attempt goes on from the files the previous one left, and all
+        # downloads share one deadline, which leaves line coverage the time it needs.
+        mirrors=/etc/apt/apt-mirrors.txt
+        deadline=$((SECONDS + 720))
+        download() {
+          local limit
+          # apt exits 100 for a misspelled package and for a failed fetch alike. This needs no
+          # network, so what no retry can fix fails here at once.
+          apt-get install --simulate --no-install-recommends "$@" > /dev/null || return
+          while true; do
+            limit=$((deadline - SECONDS))
+            if [ "$limit" -le 0 ]; then
+              echo "apt downloads did not finish within 12 minutes" >&2
+              return 1
+            fi
+            if [ "$limit" -gt 180 ]; then
+              limit=180
+            fi
+            if sudo timeout --kill-after=10 "$limit" \
+              apt-get install -y --no-install-recommends --download-only "$@"; then
+              return 0
+            fi
+            echo "apt download failed or hit its limit of $limit seconds" >&2
+            if [ -f "$mirrors" ] && grep -q 'azure\.archive\.ubuntu\.com' "$mirrors" &&
+              grep -qv 'azure\.archive\.ubuntu\.com' "$mirrors"; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$mirrors"
+              # The lists came from the mirror just dropped, and the others may differ from it.
+              sudo timeout --kill-after=10 120 apt-get update || echo "apt-get update failed" >&2
+            fi
+            sleep 15
+          done
+        }
         variant=/etc/apt/apt.conf.d/90arch-variant
         if [ -f "$variant" ]; then
           sudo rm -f "$variant"
           sudo apt-get update
           version="$(gcc -dumpversion)"
-          sudo -E apt-get install -y --no-install-recommends --reinstall --allow-downgrades \
-            libc-bin libc6 libc6-dev libgcc-s1 "libgcc-$version-dev" "libstdc++-$version-dev" \
-            "cpp-$version" "cpp-$version-x86-64-linux-gnu" \
-            "gcc-$version" "gcc-$version-x86-64-linux-gnu" \
+          toolchain=(
+            --reinstall --allow-downgrades
+            libc-bin libc6 libc6-dev libgcc-s1 "libgcc-$version-dev" "libstdc++-$version-dev"
+            "cpp-$version" "cpp-$version-x86-64-linux-gnu"
+            "gcc-$version" "gcc-$version-x86-64-linux-gnu"
             "g++-$version" "g++-$version-x86-64-linux-gnu"
+          )
+          download "${toolchain[@]}"
+          sudo -E apt-get install -y --no-install-recommends "${toolchain[@]}"
         fi
         sudo apt-get update
+        # shellcheck disable=SC2086 # the packages are separate words
+        download $PACKAGES
         # shellcheck disable=SC2086 # the packages are separate words
         sudo -E apt-get install -y --no-install-recommends $PACKAGES
         if gcc -dM -E - < /dev/null | grep -q __AVX__; then
