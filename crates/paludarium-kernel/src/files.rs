@@ -20,6 +20,52 @@ pub(crate) struct Descriptor {
     /// it `O_LARGEFILE` ([`status_flags`]); a `dup` or `SCM_RIGHTS` copy
     /// shares that, as it shares Linux's description.
     opened: bool,
+    /// What `getdents64` has returned from it, shared as the position is.
+    listed: Arc<Mutex<Listed>>,
+}
+/// The names a directory's position has passed, in the order they came. The
+/// position counts these and not places in the listing, which a later call
+/// reads anew: an unlink must not make it pass an entry that was not returned.
+#[derive(Default)]
+struct Listed {
+    order: Vec<Vec<u8>>,
+    names: BTreeSet<Vec<u8>>,
+    /// Where the last call left the position: past the end of the listing
+    /// it is more than `order` holds.
+    position: usize,
+}
+impl Listed {
+    /// Follows a position that `lseek` moved: back forgets the names after
+    /// it, and ahead passes the next ones in `entries`.
+    fn seek(&mut self, position: usize, entries: &[paludarium_host::DirectoryEntry]) {
+        if position == self.position {
+            return;
+        }
+        self.position = position;
+        while self.order.len() > position {
+            if let Some(name) = self.order.pop() {
+                self.names.remove(&name);
+            }
+        }
+        for e in entries {
+            if self.order.len() >= position {
+                break;
+            }
+            self.pass(&e.name);
+        }
+    }
+    fn pass(&mut self, name: &[u8]) {
+        if self.names.insert(name.to_vec()) {
+            self.order.push(name.to_vec());
+        }
+    }
+    /// The call returned `names`, which moved the position past them.
+    fn returned(&mut self, names: &[&Vec<u8>]) {
+        for name in names {
+            self.pass(name);
+        }
+        self.position += names.len();
+    }
 }
 impl Descriptor {
     /// A descriptor of `file`, which has no path, as a socket's.
@@ -29,6 +75,7 @@ impl Descriptor {
             path: Vec::new(),
             cloexec,
             opened: false,
+            listed: Arc::default(),
         }
     }
     /// The descriptor a process gets for this one's open file over
@@ -143,6 +190,7 @@ impl Files {
                 path: Vec::new(),
                 cloexec,
                 opened: false,
+                listed: Arc::default(),
             },
             0,
             limit,
@@ -170,6 +218,7 @@ impl Files {
                     path,
                     cloexec,
                     opened: false,
+                    listed: Arc::default(),
                 },
             );
         }
@@ -221,6 +270,7 @@ impl Files {
                         path: Vec::new(),
                         cloexec: false,
                         opened: false,
+                        listed: Arc::default(),
                     },
                 );
         }
@@ -1701,6 +1751,7 @@ pub(crate) fn run(c: &mut Context<'_>, n: u64, a: [u64; 6]) -> Result<u64, Errno
                             path,
                             cloexec,
                             opened: true,
+                            listed: Arc::default(),
                         },
                     );
                     Ok(u64::from(fd))
@@ -2141,9 +2192,11 @@ pub(crate) fn run(c: &mut Context<'_>, n: u64, a: [u64; 6]) -> Result<u64, Errno
                 _ => c.files.fs.read_dir(&d.path)?,
             };
             let position = d.file.seek(0, 1)? as usize;
+            let mut listed = d.listed.lock().unwrap_or_else(PoisonError::into_inner);
+            listed.seek(position, &entries);
             let mut bytes = Vec::new();
-            let mut count = 0;
-            for (i, e) in entries.iter().enumerate().skip(position) {
+            let mut returned = Vec::new();
+            for e in entries.iter().filter(|e| !listed.names.contains(&e.name)) {
                 let size = (19 + e.name.len() + 1).div_ceil(8) * 8;
                 if bytes.len() + size > a[2] as usize {
                     if bytes.is_empty() {
@@ -2154,14 +2207,16 @@ pub(crate) fn run(c: &mut Context<'_>, n: u64, a: [u64; 6]) -> Result<u64, Errno
                 let pos = bytes.len();
                 bytes.resize(pos + size, 0);
                 bytes[pos..pos + 8].copy_from_slice(&e.inode.to_le_bytes());
-                bytes[pos + 8..pos + 16].copy_from_slice(&((i + 1) as u64).to_le_bytes());
+                let next = position + returned.len() + 1;
+                bytes[pos + 8..pos + 16].copy_from_slice(&(next as u64).to_le_bytes());
                 bytes[pos + 16..pos + 18].copy_from_slice(&(size as u16).to_le_bytes());
                 bytes[pos + 18] = e.kind;
                 bytes[pos + 19..pos + 19 + e.name.len()].copy_from_slice(&e.name);
-                count += 1;
+                returned.push(&e.name);
             }
             output(c, a[1], &bytes)?;
-            d.file.seek(count, 1)?;
+            d.file.seek(returned.len() as i64, 1)?;
+            listed.returned(&returned);
             Ok(bytes.len() as u64)
         }
         // umask
@@ -2734,12 +2789,52 @@ impl FileHandle for StandardFile {
 #[cfg(test)]
 mod files_tests {
     use super::*;
+    fn entries(names: &[&str]) -> Vec<paludarium_host::DirectoryEntry> {
+        names
+            .iter()
+            .map(|n| paludarium_host::DirectoryEntry {
+                name: n.as_bytes().to_vec(),
+                inode: 1,
+                kind: 8,
+            })
+            .collect()
+    }
+    #[test]
+    fn listing_past_its_end_passes_nothing_added_later() {
+        let mut listed = Listed::default();
+        listed.seek(100, &entries(&["a", "b"]));
+        assert_eq!(listed.order.len(), 2);
+        // The position did not move, so what comes now was not passed.
+        listed.seek(100, &entries(&["a", "b", "c"]));
+        assert!(!listed.names.contains(b"c".as_slice()));
+        listed.returned(&[&b"c".to_vec()]);
+        assert_eq!(listed.position, 101);
+        // Not a size to allocate.
+        let mut far = Listed::default();
+        far.seek(usize::MAX, &entries(&["a"]));
+        assert_eq!(far.order.len(), 1);
+    }
+    #[test]
+    fn listing_back_forgets_what_came_after() {
+        let mut listed = Listed::default();
+        let all = entries(&["a", "b", "c"]);
+        listed.returned(&[&b"a".to_vec(), &b"b".to_vec()]);
+        listed.seek(1, &all);
+        assert_eq!(listed.order, [b"a".to_vec()]);
+        assert!(!listed.names.contains(b"b".as_slice()));
+        listed.seek(0, &all);
+        assert!(listed.names.is_empty());
+        // Ahead on a new description passes as many of the listing.
+        listed.seek(2, &all);
+        assert_eq!(listed.order, [b"a".to_vec(), b"b".to_vec()]);
+    }
     fn d(fs: &MemFs, p: &[u8]) -> Descriptor {
         Descriptor {
             file: fs.open(p, 66, 0o600).unwrap(),
             path: p.to_vec(),
             cloexec: false,
             opened: true,
+            listed: Arc::default(),
         }
     }
     #[test]
