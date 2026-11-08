@@ -79,6 +79,9 @@ pub mod nr {
     pub const GETEUID: u64 = 107;
     pub const GETEGID: u64 = 108;
     pub const SCHED_SETAFFINITY: u64 = 203;
+    pub const MBIND: u64 = 237;
+    pub const SET_MEMPOLICY: u64 = 238;
+    pub const GET_MEMPOLICY: u64 = 239;
     pub const SCHED_GETAFFINITY: u64 = 204;
     pub const GETCPU: u64 = 309;
     pub const SCHED_YIELD: u64 = 24;
@@ -135,7 +138,7 @@ impl SyscallTable {
     /// The core table.
     #[must_use]
     pub fn u1() -> Self {
-        let entries: [(u64, Handler); 66] = [
+        let entries: [(u64, Handler); 69] = [
             (nr::SETITIMER, sys_setitimer),
             (nr::RT_SIGRETURN, sys_rt_sigreturn),
             (nr::GETPID, sys_getpid),
@@ -184,6 +187,9 @@ impl SyscallTable {
             (nr::SCHED_SETAFFINITY, sys_sched_setaffinity),
             (nr::SCHED_GETAFFINITY, sys_sched_getaffinity),
             (nr::GETCPU, sys_getcpu),
+            (nr::MBIND, crate::mempolicy::sys_mbind),
+            (nr::SET_MEMPOLICY, crate::mempolicy::sys_set_mempolicy),
+            (nr::GET_MEMPOLICY, crate::mempolicy::sys_get_mempolicy),
             (nr::SCHED_YIELD, sys_sched_yield),
             (nr::SYSINFO, sys_sysinfo),
             (nr::GETRUSAGE, sys_getrusage),
@@ -1385,6 +1391,7 @@ fn sys_mmap(c: &mut Context<'_>, a: [u64; 6]) -> Outcome {
                     let _ = c.mem.unmap_shared(a, len);
                     return err(error);
                 }
+                c.group.numa().forget(a.0, len);
                 return ok(a.0);
             }
             // A private mapping shows the file's page cache until it writes
@@ -1416,6 +1423,8 @@ fn sys_mmap(c: &mut Context<'_>, a: [u64; 6]) -> Outcome {
             {
                 c.mem.mark_written(a, len);
             }
+            // A new VMA has no memory policy.
+            c.group.numa().forget(a.0, len);
             ok(a.0)
         }
         Err(e) => err(e),
@@ -1748,8 +1757,12 @@ fn sys_mremap(c: &mut Context<'_>, a: [u64; 6]) -> Outcome {
         keep_old: flags & MREMAP_DONTUNMAP != 0,
         new_addr: GuestAddr(new_addr),
     };
+    let keep_old = how.keep_old;
     match c.mem.remap_shared(GuestAddr(addr), old_len, new_len, how) {
-        Ok(at) => ok(at.0),
+        Ok(at) => {
+            c.group.numa().moved(addr, old_len, at.0, new_len, keep_old);
+            ok(at.0)
+        }
         Err(e) => err(e),
     }
 }
@@ -1787,14 +1800,28 @@ fn sys_msync(c: &mut Context<'_>, a: [u64; 6]) -> Outcome {
 
 fn sys_munmap(c: &mut Context<'_>, a: [u64; 6]) -> Outcome {
     match c.mem.unmap_shared(GuestAddr(a[0]), a[1]) {
-        Ok(()) => ok(0),
+        Ok(()) => {
+            c.group.numa().forget(a[0], a[1]);
+            ok(0)
+        }
         Err(e) => err(e),
     }
 }
 
 fn sys_brk(c: &mut Context<'_>, a: [u64; 6]) -> Outcome {
     // brk(0) and invalid requests return the current break.
-    ok(c.mem.set_break_shared(GuestAddr(a[0])).0)
+    let old = c.mem.set_break_shared(GuestAddr(0)).0;
+    let new = c.mem.set_break_shared(GuestAddr(a[0])).0;
+    // The pages it gives back, or a new VMA it grows into, have no memory
+    // policy (Linux expands the heap's VMA only when it has none).
+    // set_break maps and unmaps whole pages between the two breaks rounded
+    // up, so the page that holds an unaligned break keeps its policy.
+    let up = |n: u64| n.saturating_add(4095) & !4095;
+    let (low, high) = (up(old.min(new)), up(old.max(new)));
+    if high > low {
+        c.group.numa().forget(low, high - low);
+    }
+    ok(new)
 }
 
 const SIGKILL: u64 = 9;
