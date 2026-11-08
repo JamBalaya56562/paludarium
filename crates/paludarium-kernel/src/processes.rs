@@ -1992,6 +1992,8 @@ impl Kernel {
         let mut state = parent.state.clone();
         state.pid = pid;
         state.pending.clear();
+        // Nothing has come for the new task yet, which its group counts.
+        state.arrivals = 0;
         state.frames.clear();
         state.exit_status = None;
         state.timer = signals::RealTimer::default();
