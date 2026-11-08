@@ -28,6 +28,7 @@ mod memfd;
 mod page_cache;
 mod proc;
 mod processes;
+mod pty;
 mod record_locks;
 mod sockets;
 mod syscalls;

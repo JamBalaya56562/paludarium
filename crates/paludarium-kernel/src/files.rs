@@ -95,6 +95,8 @@ pub struct Files {
     pub(crate) network: Option<Arc<crate::inet::Network>>,
     /// The machine's AF_UNIX abstract names.
     pub(crate) unix: Arc<crate::unix::Names>,
+    /// The machine's pseudo-terminals.
+    pub(crate) devpts: Arc<crate::pty::Devpts>,
     pub fs: Arc<dyn FileSystem>,
     pub(crate) fds: Arc<Mutex<BTreeMap<u32, Descriptor>>>,
     /// Numbers an unfinished open has taken, as Linux's alloc_fd marks them
@@ -118,6 +120,7 @@ impl Default for Files {
             terminal_size: None,
             network: None,
             unix: Arc::default(),
+            devpts: Arc::default(),
             fs: Arc::new(crate::page_cache::CoherentFs::new(
                 Arc::new(fs),
                 Arc::clone(&caches),
@@ -286,6 +289,25 @@ impl Files {
         let mut fds = self.fds.lock().unwrap_or_else(PoisonError::into_inner);
         fds.insert(n, d);
         self.unreserve(n);
+    }
+    /// [`Self::fill`] with a description opened as `path`.
+    pub(crate) fn fill_opened(
+        &self,
+        n: u32,
+        file: Arc<dyn FileHandle>,
+        path: Vec<u8>,
+        cloexec: bool,
+    ) {
+        self.fill(
+            n,
+            Descriptor {
+                file,
+                path,
+                cloexec,
+                opened: false,
+                listed: Arc::default(),
+            },
+        );
     }
     pub(crate) fn unreserve(&self, n: u32) {
         self.reserved
@@ -1287,6 +1309,10 @@ fn read_blocking(
     file: &Arc<dyn FileHandle>,
     b: &mut [u8],
 ) -> Result<usize, Errno> {
+    // A pseudo-terminal reads as its line discipline says.
+    if let Some(result) = crate::pty::read(c, file, b) {
+        return result;
+    }
     // A socket's read waits as its SO_RCVLOWAT says. A pipe is a PipeEnd,
     // not a SocketPairEnd, so it reads below and still signals its writer.
     if file
@@ -1535,6 +1561,9 @@ fn path_block_size(path: &[u8]) -> u32 {
 /// Whether `d` is one of the host's standard streams and a terminal, as
 /// `TCGETS` finds it, which on Linux is a pseudo-terminal's devpts file.
 fn is_terminal(c: &Context<'_>, d: &Descriptor) -> bool {
+    if crate::pty::is_slave(&d.file) {
+        return true;
+    }
     let stream = match d.file.stdio_channel() {
         Some(0) => paludarium_host::StreamId::Stdin,
         Some(1) => paludarium_host::StreamId::Stdout,
@@ -2309,6 +2338,10 @@ pub(crate) fn run(c: &mut Context<'_>, n: u64, a: [u64; 6]) -> Result<u64, Errno
                 _ if crate::devices::entry(&d.path) == Some(crate::devices::Entry::Directory) => {
                     crate::devices::entries(c.files.fs.metadata(b"/", true)?.inode)
                 }
+                _ if crate::devices::entry(&d.path) == Some(crate::devices::Entry::Pts) => c
+                    .files
+                    .devpts
+                    .entries(crate::devices::directory_stat().inode),
                 _ => c.files.fs.read_dir(&d.path)?,
             };
             let position = d.file.seek(0, 1)? as usize;
@@ -2436,6 +2469,10 @@ pub(crate) fn write_io(
     bytes: &[u8],
     nosignal: bool,
 ) -> Result<u64, Errno> {
+    // A pseudo-terminal writes all, unless it does not block.
+    if let Some(result) = crate::pty::write(c, file, bytes) {
+        return result;
+    }
     // A socket's writes carry the credentials of their process.
     if let Some(socket) = file
         .as_any()
@@ -3128,9 +3165,28 @@ fn open_path(
     {
         return Ok((Arc::new(link), p.to_vec()));
     }
+    // `/dev/tty`: the controlling terminal, when it is one of the
+    // emulator's pseudo-terminals.
+    if p == b"/dev/tty"
+        && let Some(file) = crate::pty::open_controlling(c, flags)
+    {
+        return Ok((file?, p.to_vec()));
+    }
     let file: Arc<dyn FileHandle> = if let Some(entry) = crate::devices::entry(p) {
         const O_DIRECTORY: u32 = 0o200000;
         match entry {
+            crate::devices::Entry::Pts if flags & 3 != 0 => return Err(Errno::EISDIR),
+            crate::devices::Entry::Pts => {
+                Arc::new(crate::proc::OwnDirectory::new(crate::pty::directory_stat()))
+            }
+            crate::devices::Entry::Slave(None) => return Err(Errno::ENOENT),
+            crate::devices::Entry::Ptmx { .. } | crate::devices::Entry::Slave(_)
+                if flags & O_DIRECTORY != 0 =>
+            {
+                return Err(Errno::ENOTDIR);
+            }
+            crate::devices::Entry::Ptmx { .. } => crate::pty::open_master(c, flags)?,
+            crate::devices::Entry::Slave(Some(n)) => crate::pty::open_named(c, n, flags)?,
             // A directory opens only for reading, a device not as one.
             crate::devices::Entry::Directory if flags & 3 != 0 => return Err(Errno::EISDIR),
             crate::devices::Entry::Directory => Arc::new(crate::proc::OwnDirectory::new(
@@ -3466,10 +3522,10 @@ fn descriptor_entries(c: &Context<'_>) -> Vec<paludarium_host::DirectoryEntry> {
         .collect()
 }
 /// The `stat` of a file paludarium makes itself (`/dev`, `/proc`), with its
-/// device and block size (devtmpfs's for `/dev`, procfs's for `/proc`), or
-/// `None` for any other path and for a link to a descriptor that is not
-/// open. A link in `/proc/self/fd` is followed to its file, whose block size
-/// it takes, unless `follow` is false.
+/// device and block size (devtmpfs's for `/dev`, devpts's for `/dev/pts`,
+/// procfs's for `/proc`), or `None` for any other path and for a link to a
+/// descriptor that is not open. A link in `/proc/self/fd` is followed to its
+/// file, whose block size it takes, unless `follow` is false.
 fn generated_stat(
     c: &Context<'_>,
     path: &[u8],
@@ -3481,20 +3537,45 @@ fn generated_stat(
         let task = tasks::find(c, &task_path)?;
         return tasks::stat(c, path, &task, task_path.entry, follow).map(Some);
     }
-    Ok(known_stat(c, path, follow))
+    known_stat(c, path, follow)
 }
-/// [`generated_stat`] of the files that are always there.
-fn known_stat(c: &Context<'_>, path: &[u8], follow: bool) -> Option<(FileStat, u64, u32)> {
+/// [`generated_stat`] of the files that are always there. A name in
+/// `/dev/pts` that no slave has is `ENOENT`, as devpts holds no other.
+fn known_stat(
+    c: &Context<'_>,
+    path: &[u8],
+    follow: bool,
+) -> Result<Option<(FileStat, u64, u32)>, Errno> {
     if let Some(target) = crate::devices::through_link(path) {
         return known_stat(c, &target, follow);
     }
     match crate::devices::entry(path) {
-        Some(crate::devices::Entry::Link(target)) if follow => {
-            return known_stat(c, target, follow);
+        Some(crate::devices::Entry::Link(target)) if follow => known_stat(c, target, follow),
+        Some(crate::devices::Entry::Slave(number)) => {
+            let stat = crate::pty::slave_stat(c, number.ok_or(Errno::ENOENT)?)?;
+            Ok(Some((stat, device(c, path), SMALL_BLOCK_SIZE)))
         }
-        Some(entry) => return Some((crate::devices::stat(entry), device(c, path), BLOCK_SIZE)),
-        None => {}
+        Some(
+            entry @ (crate::devices::Entry::Pts | crate::devices::Entry::Ptmx { devpts: true }),
+        ) => Ok(Some((
+            crate::devices::stat(entry),
+            device(c, path),
+            SMALL_BLOCK_SIZE,
+        ))),
+        Some(entry) => Ok(Some((
+            crate::devices::stat(entry),
+            device(c, path),
+            BLOCK_SIZE,
+        ))),
+        None => Ok(other_generated_stat(c, path, follow)),
     }
+}
+/// [`generated_stat`] of a path outside `/dev`.
+fn other_generated_stat(
+    c: &Context<'_>,
+    path: &[u8],
+    follow: bool,
+) -> Option<(FileStat, u64, u32)> {
     if let Some(mountinfo) = crate::proc::mount_table(path) {
         let length = crate::proc::render(&c.files.fs.mounts(), mountinfo).len();
         return Some((crate::proc::stat(length), device(c, path), SMALL_BLOCK_SIZE));
