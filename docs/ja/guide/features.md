@@ -1369,6 +1369,15 @@ TCP のソケットは、ゲスト自身のループバックの上で Linux と
   います。メモリ上でも、Linux か macOS でマウントしたホストのディレクトリでも使えます。
   `RENAME_WHITEOUT` には `CAP_MKNOD` が要り（なければ `EPERM`）、あっても
   ホワイトアウトのない Linux のファイルシステムと同じく `EINVAL` を返します。
+- `linkat` は `AT_SYMLINK_FOLLOW` と `AT_EMPTY_PATH` に対応しています。
+  `AT_SYMLINK_FOLLOW` は古いパスの最後のシンボリックリンク（リンク先がなければ
+  `ENOENT`）と、`/proc/self/fd` のリンクをディスクリプタのファイルまでたどります。
+  `AT_EMPTY_PATH` は古いパスが空のとき、ディスクリプタ（`O_PATH` のものも）が持つ
+  ファイルをリンクします（ディレクトリは `EPERM`）。削除したファイルはもうリンク
+  できず（`ENOENT`）、memfd、パイプ、ソケット、`/proc` のファイルは別のファイル
+  システムにあります（`EXDEV`）。Linux 6.10 以降は、呼び出し元と違う資格情報で
+  開いたファイルへの `AT_EMPTY_PATH` を、`CAP_DAC_READ_SEARCH` がなければ断ります
+  （`ENOENT`）が、paludarium はこれを確かめません。
 - Landlock は、スレッドがアクセスできるファイルの階層と TCP のポートを ABI バージョン 5
   の範囲で制限します。`landlock_create_ruleset`（バージョンの問い合わせを含む）、
   `LANDLOCK_RULE_PATH_BENEATH` と `LANDLOCK_RULE_NET_PORT` の `landlock_add_rule`、
