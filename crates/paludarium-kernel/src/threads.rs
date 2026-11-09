@@ -71,6 +71,11 @@ pub struct ThreadGroup {
     /// The path of the program the process runs, which `/proc/self/exe`
     /// names (Linux's `exe_file`).
     executable: Mutex<Vec<u8>>,
+    /// The denial of writes to that program's file, which the process holds
+    /// while it runs it, and a fork shares (Linux's `exe_file`, which
+    /// `dup_mm_exe_file` denies again); none for a program of no regular
+    /// file.
+    exe_file: Mutex<Option<Arc<crate::page_cache::WriteAccess>>>,
     /// What each thread keeps itself that other processes read in `/proc`,
     /// as of its last checkpoint. The leader's stays while it is a zombie.
     public: Mutex<BTreeMap<u32, PublicThread>>,
@@ -119,6 +124,7 @@ impl Default for ThreadGroup {
             start_stack: AtomicU64::new(0),
             robust_lists: Mutex::default(),
             executable: Mutex::default(),
+            exe_file: Mutex::default(),
             public: Mutex::default(),
         }
     }
@@ -242,6 +248,12 @@ impl ThreadGroup {
             // and the program itself (Linux's `exe_file`).
             start_stack: AtomicU64::new(self.start_stack()),
             executable: Mutex::new(self.executable()),
+            exe_file: Mutex::new(
+                self.exe_file
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone(),
+            ),
             ..Self::default()
         }
     }
@@ -662,6 +674,11 @@ impl ThreadGroup {
             .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
+    /// Keeps the denial of writes to the program's file, giving back the
+    /// one of the program before.
+    pub(crate) fn set_exe_file(&self, denied: Option<Arc<crate::page_cache::WriteAccess>>) {
+        *self.exe_file.lock().unwrap_or_else(PoisonError::into_inner) = denied;
+    }
     pub(crate) fn set_executable(&self, path: Vec<u8>) {
         *self
             .executable
@@ -862,11 +879,19 @@ impl Kernel {
         self.pending_child.take()
     }
     pub fn abandon_thread(&self, tid: u32) {
-        self.group
-            .members
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&tid);
+        let alone = {
+            let mut members = self
+                .group
+                .members
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            members.remove(&tid);
+            members.is_empty()
+        };
+        // As in `finish_thread`: no thread left runs the program.
+        if alone {
+            self.group.set_exe_file(None);
+        }
         self.group.forget_nice(tid);
         self.group.forget_task_ids(self.process.pid, tid);
         self.group.forget_public(self.process.pid, tid);
@@ -926,12 +951,21 @@ impl Kernel {
                 Self::clear_child_tid(&self.group, mem, addr);
             }
         }
-        self.group
-            .members
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&thread.tid);
+        let alone = {
+            let mut members = self
+                .group
+                .members
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            members.remove(&thread.tid);
+            members.is_empty()
+        };
         drop(core);
+        // The last thread's exit ends the process's use of its program,
+        // whose file may be written again (`exit_mm`).
+        if alone {
+            self.group.set_exe_file(None);
+        }
         if thread.tid != self.process.pid {
             self.group.forget_nice(thread.tid);
         }
