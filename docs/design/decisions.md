@@ -63,7 +63,14 @@ changes them does not matter: an access that saw neither change comes before
 the truncation, as one under way while it ran, and a copy that the truncation
 leaves past the end is replaced at the next access under the locks, so a
 store that landed in it is never seen. No access that starts after the
-truncation returns uses the page.
+truncation returns uses the page. Under the locks, an access checks the end
+of the file again after it has brought the page entry up to date, as a
+truncation may come between the two. The page cache gives the new size, and
+zeros past it, before it counts the shrink, and a copy of a page-cache page
+records the count read before it copies. So an entry that records the new
+count was made after the new size could be seen, and a copy that took bytes
+from before the shrink records an older count, and goes if the page is past
+the end.
 
 The pages of a shared mapping (`MAP_SHARED` memory or file, System V shared
 memory) go in the TLB too, with the memory they show. A store through the

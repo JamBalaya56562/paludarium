@@ -932,12 +932,15 @@ impl FileSize {
     pub fn grow_to(&self, size: u64) {
         self.size.fetch_max(size, Ordering::SeqCst);
     }
-    /// Sets the size, and returns the new count of shrinks if it shrank.
-    /// The count moves on after the new size shows, so that whoever reads
-    /// the new count and then the size sees the new size.
-    pub fn set(&self, size: u64) -> Option<u64> {
-        let old = self.size.swap(size, Ordering::SeqCst);
-        (size < old).then(|| self.shrinks.fetch_add(1, Ordering::SeqCst) + 1)
+    /// Sets the size, and says whether it shrank. A shrink is counted with
+    /// [`Self::count_shrink`] once the bytes past the new end read as zeros,
+    /// so that whoever reads the new count sees both ([`PageSource::shrinks`]).
+    pub fn set(&self, size: u64) -> bool {
+        size < self.size.swap(size, Ordering::SeqCst)
+    }
+    /// Counts a shrink [`Self::set`] made, and gives the new count.
+    pub fn count_shrink(&self) -> u64 {
+        self.shrinks.fetch_add(1, Ordering::SeqCst) + 1
     }
 }
 
@@ -954,7 +957,10 @@ pub trait PageSource: Send + Sync {
     fn size(&self) -> Option<u64> {
         None
     }
-    /// How many times the file has shrunk.
+    /// How many times the file has shrunk. A shrink is counted after
+    /// [`Self::size`] gives the new size and the page cache reads as zeros
+    /// past it, so that whoever reads the new count sees both: a page past
+    /// the end as past it, and no bytes from before the shrink there.
     fn shrinks(&self) -> u64 {
         0
     }
@@ -1725,7 +1731,8 @@ impl AddressSpaceData {
                 .is_some_and(|m| m.kind == MappingKind::File),
             cow: shared.is_none() && cache().is_some(),
             cache: shared.is_none() && cache().is_some(),
-            shrinks: 0,
+            // Made now, so no shrink so far can leave it past the end.
+            shrinks: self.file_at(page).map_or(0, |(source, _)| source.shrinks()),
         }
     }
     /// A new entry for `page`, with its file read into it if need be.
@@ -1763,12 +1770,8 @@ impl AddressSpaceData {
                     .shrunk_since(p.shrinks)
                     .is_some_and(|size| offset >= size.div_ceil(PAGE_SIZE) * PAGE_SIZE);
                 if past {
-                    // Made after the shrinks so far, which it must not go
-                    // with in turn.
-                    let mut fresh = self.fresh(page, p.prot);
-                    fresh.shrinks = count;
                     let fetched = p.frame.fetched();
-                    *entry = Some(fresh);
+                    *entry = Some(self.fresh(page, p.prot));
                     if fetched {
                         // The page shows other bytes than the instructions
                         // decoded from it.
@@ -1783,6 +1786,12 @@ impl AddressSpaceData {
         let Some(p) = entry.as_mut() else {
             return true;
         };
+        // A copy of a page-cache page records the shrinks counted before it
+        // copies: a truncation counts a shrink only once the bytes past the
+        // new end read as zeros, so a copy that took the bytes from before
+        // it records an older count, and goes if the page is past the end.
+        let shrinks = (write && p.cow && p.cache)
+            .then(|| self.file_at(page).map_or(0, |(source, _)| source.shrinks()));
         // A forked frame that no other space holds any more is this one's
         // own: the space holds its lock, so no other can take it meanwhile.
         if write && p.cow && (p.cache || Arc::strong_count(&p.frame) > 1) {
@@ -1796,7 +1805,7 @@ impl AddressSpaceData {
             p.cow = false;
             if p.cache {
                 p.cache = false;
-                p.shrinks = self.file_at(page).map_or(0, |(source, _)| source.shrinks());
+                p.shrinks = shrinks.unwrap_or_default();
             }
         }
         true
@@ -2125,6 +2134,9 @@ impl AddressSpaceData {
                 }
             }
         }
+        // Again, as a truncation may have come between the check and the
+        // refresh: a page it left past the end of the file is a bus error.
+        self.check(&directory, addr, buf.len(), access)?;
         if access == Access::Fetch {
             self.mark_fetched(&directory, addr, buf.len());
         }
@@ -2290,6 +2302,11 @@ impl AddressSpaceData {
                 return Err(self.out_of_room(page));
             }
         }
+        // Again, as a truncation may have come between the check and the
+        // refresh, which read the shrinks after it: a page it left past the
+        // end of the file must not take the write, in a copy that records
+        // the shrink and so would stay.
+        self.check(&directory, addr, len, access)?;
         if let Some(page) = Self::single_page(addr, len) {
             self.remember(&directory, page);
         }
