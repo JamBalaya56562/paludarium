@@ -171,16 +171,19 @@ verified.
   `chown` gives a file, and those of a file a guest makes there, are kept
   only while the emulator runs, not on the host file. The next run sees
   every file there as root's again.
-- **Landlock**: only ABI version 5 is there, so `LANDLOCK_CREATE_RULESET_VERSION`
-  gives 5 where a recent Linux gives more: no scopes, no
-  `landlock_restrict_self` flags and no errata query (`EINVAL`), and nothing
-  is logged. A rename's Landlock check comes after its permission checks,
-  where Linux's comes before them, which shows only when both refuse. A rule
-  on a file under `/proc` does not count for `execve`. An open checks the
-  file its path reaches before it opens it (and the file it made after), so
-  another thread renaming the name in between can make the two differ. There
-  is no `mount`, `umount2` or `pivot_root` (`ENOSYS`), which Linux refuses a
-  thread in a domain (`EPERM`).
+- **Landlock**: ABI version 8 is the newest there; the logging flags are
+  taken, but nothing is logged. With `LANDLOCK_RESTRICT_SELF_TSYNC` the other
+  threads take the new domain for their own checks when they next enter the
+  kernel, where Linux waits until they all have. Signals to them meet it at
+  once, and `/proc` shows it after each one's next system call. `SIGIO` and
+  `SIGURG` from `F_SETOWN` are not scoped, as `F_SETOWN` records no sender. A
+  rename's Landlock check comes after its permission checks, where Linux's
+  comes before them, which shows only when both refuse. A rule on a file under
+  `/proc` does not count for `execve`. An open checks the file its path
+  reaches before it opens it (and the file it made after), so another thread
+  renaming the name in between can make the two differ. There is no `mount`,
+  `umount2` or `pivot_root` (`ENOSYS`), which Linux refuses a thread in a
+  domain (`EPERM`).
 - **Credentials**: the IDs and capabilities a thread takes are checked on
   files, signals, resource limits, priorities, socket credentials and core
   files but nowhere else yet. `F_SETOWN` records no sender's credentials, so
