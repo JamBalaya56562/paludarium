@@ -414,10 +414,11 @@ kernel.
     UDP socket signals `POLL_ERR`. An urgent byte on the loopback signals
     `POLL_PRI` after its `SIGURG`.
   - **A waiting reader.** A stream whose read waits gets no signal for the
-    data, end or hang-up that ends the wait, as Linux holds it back; of a
-    send in parts, only the first. For the peer's shutdown or close Linux
-    holds it back only when the reader has not run yet (it wakes the
-    reader before it looks), so there it sometimes signals. A datagram or
+    data, end or hang-up that ends the wait, as Linux holds it back
+    (`SOCKWQ_ASYNC_WAITDATA`); of a send in parts, only the first. Linux
+    holds it back only when the reader has not run yet, as it wakes the
+    reader before it looks, so for a send, the peer's shutdown or its
+    close Linux sometimes signals; the emulator never does. A datagram or
     packet socket's reader gets it.
 - `setsockopt` and `getsockopt` take the `SOL_SOCKET` options as Linux's
   `sk_setsockopt` and `sk_getsockopt` do, with their defaults and checks: an
