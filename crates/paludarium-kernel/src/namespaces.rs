@@ -1,10 +1,11 @@
 //! A thread's namespaces, as Linux's `nsproxy` with the user and PID
 //! namespaces beside it: each thread has its own set, which `clone`,
 //! `unshare` and `setns` change and `/proc/<pid>/ns` shows. The UTS
-//! namespace holds the host and domain names that `uname` reports; the IPC,
-//! mount, cgroup and time namespaces have nothing in them that paludarium
-//! keeps apart (there is no System V IPC, no `mount`, no cgroup file and no
-//! clock offset), so a new one differs only in its identity. The network,
+//! namespace holds the host and domain names that `uname` reports, and the
+//! IPC namespace the System V shared memory segments; the mount, cgroup and
+//! time namespaces have nothing in them that paludarium keeps apart (there
+//! is no `mount`, no cgroup file and no clock offset), so a new one differs
+//! only in its identity. The network,
 //! PID and user namespaces are the first ones only.
 use paludarium_host::{FileHandle, FileStat};
 use paludarium_types::Errno;
@@ -119,6 +120,9 @@ pub(crate) struct Namespace {
     pub kind: Kind,
     pub inode: u32,
     names: Mutex<UtsNames>,
+    /// The System V shared memory segments of an IPC namespace, which go
+    /// with it, as Linux's `shm_exit_ns` removes them.
+    pub shm: crate::shm::Segments,
 }
 impl Namespace {
     fn new(kind: Kind, inode: u32, names: UtsNames) -> Arc<Self> {
@@ -126,6 +130,7 @@ impl Namespace {
             kind,
             inode,
             names: Mutex::new(names),
+            shm: crate::shm::Segments::default(),
         })
     }
     /// What its link in `/proc/<pid>/ns` reads, as Linux's `ns_get_name`.

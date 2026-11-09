@@ -146,19 +146,35 @@ verified.
     them. Programs check for that and carry on. Saying yes would be wrong
     without the rest: protection keys need the CPU feature, which `CPUID` does
     not report, and io_uring's rings would do no work.
+  - System V semaphores (`semget`, `semop`, `semtimedop`, `semctl`) and
+    message queues (`msgget`, `msgsnd`, `msgrcv`, `msgctl`) are too; only its
+    shared memory is implemented. There is no `/proc/sysvipc`, and the limits
+    of shared memory are Linux's defaults, which `/proc/sys/kernel` cannot
+    change.
   - `get_robust_list` of another process is `ESRCH`, where Linux gives it to a
     caller that may trace that process.
   - `mincore` counts a page of a file as in memory whenever it lies within the
     file, where Linux asks its page cache, and does not count a page that
     `MAP_POPULATE`, `MAP_LOCKED` or a memory lock brought in until it is touched.
-  - Memory locks leave no state. So `RLIMIT_MEMLOCK` is not enforced, which
-    matters only to a guest that gave up `CAP_IPC_LOCK`, `MADV_DONTNEED` works on
+  - Memory locks leave no state. So `RLIMIT_MEMLOCK` is not enforced on
+    them (only on `SHM_LOCK`), which matters only to a guest that gave up
+    `CAP_IPC_LOCK`, `MADV_DONTNEED` works on
     locked memory where Linux gives `EINVAL`, `mlock` succeeds on the pages of a
     file mapping past the end of the file where Linux gives `ENOMEM`, and
     `/proc` shows no locked memory.
   - A memory policy that `mbind` gives a shared mapping belongs to that
     mapping, where Linux keeps it with the shared memory itself, for every
     process that maps it. `/proc/<pid>/numa_maps` does not exist.
+  - A System V shared memory segment's `shm_atime`, `shm_dtime` and
+    `shm_lpid` change at `shmat` and `shmdt` only, where Linux also changes
+    them when a `fork` copies an attachment, `munmap` or `mprotect` splits
+    one, or a process exits or execs with one. `shmdt` finds the
+    attachments of the segments of the thread's IPC namespace only, where
+    Linux detaches one made before `setns` or `unshare` moved the thread to
+    another. An `mprotect` that gives part
+    of an attachment back the protection of the piece next to it makes a
+    piece of its own, which counts as an attachment, where recent Linux
+    moves the boundary between the two.
 - **Extended attributes**: a mounted host directory behaves as a file system
   without them, so reading finds none (`ENODATA`) and writing gives `EOPNOTSUPP`.
   In memory, a file's `system.*` attributes do not exist (`EOPNOTSUPP`), a value
@@ -239,8 +255,9 @@ verified.
   and create no child, where Linux lets the guest, which runs as root,
   create them; `CLONE_NEWUSER`, which Linux also lets a user have, is
   `EINVAL` for every thread. The other namespaces keep nothing apart that
-  paludarium has: there is no System V IPC or POSIX message queue for an IPC
-  namespace, no `mount` for a mount namespace (whose mounts keep their IDs
+  paludarium has, but for the System V shared memory of an IPC namespace:
+  there are no System V semaphores, System V message queues or POSIX
+  message queues for one, no `mount` for a mount namespace (whose mounts keep their IDs
   in `/proc/self/mountinfo`, where Linux gives a new namespace's copies new
   ones), no `/proc/self/cgroup` for a cgroup namespace, and no
   `/proc/<pid>/timens_offsets` for a time namespace, whose clocks are the

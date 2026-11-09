@@ -791,6 +791,16 @@ impl Processes {
     pub(crate) fn fifos(&self) -> Arc<crate::fifo::Fifos> {
         Arc::clone(&self.fifos)
     }
+    /// The soft limit of `resource` of process `pid`, or infinity for a
+    /// process that is gone.
+    pub(crate) fn soft_limit(&self, pid: u32, resource: usize) -> u64 {
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&pid)
+            .and_then(|entry| entry.limits.get(resource))
+            .map_or(u64::MAX, |&(soft, _)| soft)
+    }
     pub(crate) fn finish(&self, pid: u32, status: ExitStatus) {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = entries.get_mut(&pid) {
