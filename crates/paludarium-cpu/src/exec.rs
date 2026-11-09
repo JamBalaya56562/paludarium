@@ -38,6 +38,9 @@ impl From<Fault> for Stop {
 const FX_AREA: usize = 512;
 type Result<T> = core::result::Result<T, Stop>;
 
+mod fast;
+pub(crate) use fast::{Fast, execute as execute_fast};
+
 fn atomic_width(size: u8) -> Result<AtomicWidth> {
     match size {
         1 => Ok(AtomicWidth::W8),
@@ -1963,8 +1966,9 @@ impl Exec<'_> {
 
 /// Executes `i` on `s`. On success `s.rip` points at the next instruction to
 /// run. On any [`Stop`] other than `Syscall`, `s.rip` is left at `i`.
-// Every instruction comes through here from `execute_decoded`, its only caller
-// outside the tests. It has grown past what the compiler inlines by itself, and
+// Every instruction without a form of `Fast`, and every form that fails,
+// comes through here from `execute_decoded`, its only caller outside the
+// tests. It has grown past what the compiler inlines by itself, and
 // the call costs a guest about 4% in the wasm build.
 #[inline(always)]
 pub(crate) fn execute(s: &mut CpuState, mem: &AddressSpace, i: &Instruction) -> Result<()> {
