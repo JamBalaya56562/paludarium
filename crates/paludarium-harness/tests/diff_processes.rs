@@ -414,6 +414,7 @@ mod linux {
         processes_msg => ("msg","process"),
         processes_rseq => ("rseq","process"),
         processes_pkey => ("pkey","process"),
+        processes_mprotect_checks => ("mprotect-checks","process"),
         vfork_exit => ("vfork-exit","process"),
         processes_exec => ("exec","process"),
         exec_thread => ("exec-thread","process"),
