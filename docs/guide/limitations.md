@@ -170,6 +170,13 @@ verified.
   changes nothing (no request is ever in flight).
 - **Some system calls**: unimplemented system calls return `ENOSYS`, so some
   programs can carry on without the feature.
+  - `pwritev2`'s `RWF_NOAPPEND` cannot turn an `O_APPEND` file's append off
+    here, so it gives `EOPNOTSUPP` for such a file, where Linux writes at the
+    offset. `RWF_NOWAIT` behaves as on ext4 for every regular file: a read
+    takes it, a write gives `EOPNOTSUPP`, where tmpfs refuses both and other
+    filesystems may take a write, and a read never finds its pages uncached
+    (Linux's `EAGAIN`). The flags of kernels after 6.12, `RWF_DONTCACHE`
+    and `RWF_NOSIGNAL`, are unknown here (`EOPNOTSUPP`).
   - An error that ends `recvmmsg` after some messages is dropped, where
     Linux keeps it as the socket's error for the next call and
     `SO_ERROR`, and `recvmmsg` does not first give a socket's pending error.
