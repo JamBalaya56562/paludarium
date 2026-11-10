@@ -1389,6 +1389,74 @@ static long nl_answer(int fd, long seq, unsigned port, const char *label) {
         }
     }
 }
+/* Route lookups on `fd` (RTM_GETROUTE without a dump), as `ip route get`
+   sends them, printed by nl_answer: to each of the destinations below, and
+   with RTM_F_FIB_MATCH (0x2000) to one. */
+static void nl_lookups(int fd, unsigned port, const char *when) {
+    static const struct {
+        unsigned char family, len;
+        unsigned flags;
+        const char *text;
+    } asked[] = {
+        {AF_INET, 4, 0, "127.0.0.1"},       {AF_INET, 4, 0, "127.1.2.3"}, {AF_INET, 4, 0, "127.255.255.255"},
+        {AF_INET, 4, 0, "8.8.8.8"},         {AF_INET, 4, 0, "0.0.0.0"},   {AF_INET, 4, 0x2000, "127.1.2.3"},
+        {AF_INET, 4, 0x2000, "127.0.0.1"},  {AF_INET6, 16, 0, "::1"},     {AF_INET6, 16, 0, "2001:db8::1"},
+        {AF_INET6, 16, 0x2000, "::1"},      {AF_INET, 4, 0x2000, "0.0.0.0"},
+    };
+    for (size_t i = 0; i < sizeof asked / sizeof asked[0]; i++) {
+        unsigned char request[12 + 4 + 16] = {asked[i].family, asked[i].len * 8};
+        memcpy(request + 8, &asked[i].flags, 4);
+        unsigned short attribute[2] = {4 + asked[i].len, 1};
+        memcpy(request + 12, attribute, 4);
+        inet_pton(asked[i].family, asked[i].text, request + 16);
+        char label[64];
+        snprintf(label, sizeof label, "%s get %s%s", when, asked[i].flags ? "fibmatch " : "", asked[i].text);
+        nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST, request, 16 + asked[i].len), port, label);
+    }
+    /* A user ID the request names: as it is, longer, invalid, too short. */
+    static const struct {
+        unsigned char len;
+        unsigned char uid[8];
+    } uids[] = {{4, {0xe8, 3, 0, 0}}, {6, {0xe8, 3, 0, 0, 7, 7}}, {4, {0xff, 0xff, 0xff, 0xff}}, {2, {0xe8, 3}}};
+    for (size_t i = 0; i < sizeof uids / sizeof uids[0]; i++) {
+        unsigned char request[12 + 8 + 12] = {AF_INET, 32};
+        unsigned short destination[2] = {8, 1}, user[2] = {4 + uids[i].len, 25};
+        memcpy(request + 12, destination, 4);
+        memcpy(request + 16, "\x7f\0\0\x01", 4);
+        memcpy(request + 20, user, 4);
+        memcpy(request + 24, uids[i].uid, uids[i].len);
+        char label[64];
+        snprintf(label, sizeof label, "%s get uid %zu", when, i);
+        nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST, request, 24 + ((uids[i].len + 3) & ~3)), port, label);
+    }
+    {
+        /* An IPv6 lookup checks the length of RTA_UID too. */
+        unsigned char request[12 + 20 + 8] = {AF_INET6, 128};
+        unsigned short destination[2] = {20, 1}, user[2] = {6, 25};
+        memcpy(request + 12, destination, 4);
+        request[16 + 15] = 1;
+        memcpy(request + 32, user, 4);
+        memcpy(request + 36, "\xe8\x03", 2);
+        char label[64];
+        snprintf(label, sizeof label, "%s get IPv6 with a short uid", when);
+        nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST, request, sizeof request), port, label);
+    }
+    /* A destination shorter than its family's address, and one longer. */
+    static const struct {
+        unsigned char family, len;
+    } sized[] = {{AF_INET, 2}, {AF_INET, 6}, {AF_INET6, 4}, {AF_INET6, 18}};
+    for (size_t i = 0; i < sizeof sized / sizeof sized[0]; i++) {
+        unsigned char request[12 + 4 + 20] = {sized[i].family};
+        unsigned short attribute[2] = {4 + sized[i].len, 1};
+        memcpy(request + 12, attribute, 4);
+        if (sized[i].family == AF_INET) memcpy(request + 16, "\x7f\0\0\x01\x09\x09", 6);
+        else request[16 + 15] = 1;
+        char label[64];
+        snprintf(label, sizeof label, "%s get %s of %u bytes", when, sized[i].family == AF_INET ? "IPv4" : "IPv6",
+                 sized[i].len);
+        nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST, request, 16 + ((sized[i].len + 3) & ~3)), port, label);
+    }
+}
 /* What getifaddrs gives, one line each. */
 static void nl_getifaddrs(const char *label) {
     struct ifaddrs *list, *i;
@@ -5575,11 +5643,15 @@ static int msg_case(void) {
     }
     if (read(ready[0], &byte, 1) != 1) return 15;
     usleep(100000);
-    /* The other message is still there, for no one. */
+    /* The other message is still there, for no one. The removal wakes
+       the waiter, which prints at once, so this side prints what it has
+       first and the removal's result only once the waiter is gone. */
     msgx_status("before-removal", id, getpid(), waiter);
-    printf("removal=%ld\n", syscall(SYS_msgctl, id, IPC_RMID, NULL));
     fflush(stdout);
-    result("waiter", reaped(waiter));
+    long removal = syscall(SYS_msgctl, id, IPC_RMID, NULL);
+    int waited = reaped(waiter);
+    printf("removal=%ld\n", removal);
+    result("waiter", waited);
     errno = 0;
     long removed = syscall(SYS_msgctl, id, 2, ds);
     printf("stat-removed=%ld errno=%d\n", removed, errno);
@@ -6654,6 +6726,7 @@ int main(int argc, char **argv) {
             nl_answer(fd, nl_send(fd, 18, NL_F_REQUEST | NL_F_DUMP, &family, 1), port, "down link");
             nl_answer(fd, nl_send(fd, 22, NL_F_REQUEST | NL_F_DUMP, &family, 1), port, "down addr");
             nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST | NL_F_DUMP, &family, 1), port, "down route");
+            nl_lookups(fd, port, "down");
             nl_getifaddrs("down ifaddrs");
             /* Errors and acknowledgements. */
             struct nl_link link = {.index = 1, .flags = IFF_UP, .change = IFF_UP};
@@ -6674,6 +6747,7 @@ int main(int argc, char **argv) {
                 getsockname(own, (void *)&mine, &mine_len);
                 nl_answer(own, nl_seq, mine.pid, "user link");
                 nl_answer(own, nl_send(own, 16, NL_F_REQUEST, &link, sizeof link), mine.pid, "user set");
+                nl_lookups(own, mine.pid, "user");
                 fflush(stdout);
                 _exit(0);
             }
@@ -6691,6 +6765,7 @@ int main(int argc, char **argv) {
             nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST | NL_F_DUMP, &inet4, 1), port, "up route4");
             nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST | NL_F_DUMP, &inet6, 1), port, "up route6");
             nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST | NL_F_DUMP, &multicast, 1), port, "up route ipmr");
+            nl_lookups(fd, port, "up");
             char by_name[24] = {0};
             unsigned short attribute[2] = {7, 3};
             memcpy(by_name + 16, attribute, 4);
@@ -6703,6 +6778,7 @@ int main(int argc, char **argv) {
             nl_answer(fd, nl_send(fd, 18, NL_F_REQUEST | NL_F_DUMP, &family, 1), port, "down again link");
             nl_answer(fd, nl_send(fd, 22, NL_F_REQUEST | NL_F_DUMP, &family, 1), port, "down again addr");
             nl_answer(fd, nl_send(fd, 26, NL_F_REQUEST | NL_F_DUMP, &family, 1), port, "down again route");
+            nl_lookups(fd, port, "down again");
             nl_getifaddrs("down again ifaddrs");
             fflush(stdout);
             _exit(0);
