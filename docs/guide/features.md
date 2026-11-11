@@ -2106,19 +2106,21 @@ one only with an `--allow-net`.
   `write`, `readv`, `writev`, `pread64`, `pwrite64`, `preadv`, `pwritev`,
   `preadv2`, `pwritev2`,
   `wait4`, `waitid`, `pause`, `rt_sigsuspend`, `flock`, `fcntl`'s `F_SETLKW` and
-  `F_OFD_SETLKW`, `sendto`, `recvfrom`,
-  `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`, `splice`, `tee`, `vmsplice`, `ppoll`, `select`, `pselect6`, `poll` with no timeout
-  and a `futex` wait with none, and `futex_waitv` and futex2's `futex_wait`
-  with or without one. `nanosleep`, a relative `clock_nanosleep`,
-  `poll` with a timeout and a timed `futex` wait resume through
-  `restart_syscall` with the deadline they had (the `futex` wait checks its word
-  again first, `EAGAIN` once it changed), and
-  an absolute `clock_nanosleep` runs again; a handler ends the restart, so they
+  `F_OFD_SETLKW`, `open`, `openat` and `openat2` of a FIFO, `accept`,
+  `accept4`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `sendmmsg`,
+  `recvmmsg`, `msgsnd`, `msgrcv`, `mq_timedsend`, `mq_timedreceive`,
+  `sendfile`, `splice`, `tee`, `vmsplice`, `ppoll`, `select`, `pselect6`,
+  `poll` with no timeout and a `futex` wait with none, and `futex_waitv` and
+  futex2's `futex_wait` with or without one. `nanosleep`, a relative
+  `clock_nanosleep`, `poll` with a timeout and a timed `futex` wait resume
+  through `restart_syscall` with the deadline they had (the `futex` wait
+  checks its word again first, `EAGAIN` once it changed), and an absolute
+  `clock_nanosleep` runs again; a handler ends the restart, so they
   give `EINTR` then. A handler set with `SA_RESTART` runs the calls that a
   stop runs again (from `read` to the `futex` wait with no timeout) again when
-  it returns, as on Linux, except `pause`,
-  `rt_sigsuspend`, `poll`, `ppoll`, `select`, `pselect6` and a socket call
-  whose wait `SO_RCVTIMEO` or `SO_SNDTIMEO` limits, which give `EINTR`.
+  it returns, as on Linux, except `pause`, `rt_sigsuspend`, `msgsnd`,
+  `msgrcv`, `poll`, `ppoll`, `select`, `pselect6` and a socket call whose
+  wait `SO_RCVTIMEO` or `SO_SNDTIMEO` limits, which give `EINTR`.
   `epoll_wait`, `epoll_pwait`, `epoll_pwait2` and `rt_sigtimedwait` give
   `EINTR`, as on Linux. `rt_sigsuspend` waits with its mask in place of the signal mask until a
   handler has run, which runs with that mask; the original mask is back after
