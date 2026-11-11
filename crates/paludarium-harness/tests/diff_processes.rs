@@ -329,6 +329,7 @@ mod linux {
         inotify_flags => ("inotify-flags","inotify"),
         inotify_overflow => ("inotify-overflow","inotify"),
         inotify_wait => ("inotify-wait","inotify"),
+        inotify_content => ("inotify-content","inotify"),
         mqueue_calls => ("mqueue-calls","mqueue"),
         mqueue_limits => ("mqueue-limits","mqueue"),
         mqueue_wait => ("mqueue-wait","mqueue"),
