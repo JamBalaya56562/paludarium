@@ -44,6 +44,51 @@ pub(crate) struct PageCaches {
     /// [`CoherentFile`], by its handle), which keep a removed file there
     /// for inotify until the last is closed, as Linux's dentry keeps it.
     opens: Mutex<HashMap<usize, Open>>,
+    /// The files the machine's processes hold other than by a description,
+    /// each with how many [`Hold`]s hold it: working directories, as Linux's
+    /// `fs->pwd` holds its dentry, and the ELF interpreters programs run
+    /// with, as their mappings hold theirs. They keep a removed file there
+    /// for inotify too.
+    holds: Mutex<HashMap<Key, usize>>,
+}
+
+/// A hold on a file a process keeps without a description (a working
+/// directory's `fs->pwd`, or the mappings of a program's interpreter):
+/// while it lasts, a removed file's end (`IN_DELETE_SELF`) waits, as for
+/// an open description.
+pub(crate) struct Hold {
+    caches: Arc<PageCaches>,
+    key: Key,
+}
+
+impl Hold {
+    /// Another hold on the same file, as `copy_fs_struct` takes one.
+    pub(crate) fn copy(&self) -> Hold {
+        self.caches.hold_of(self.key)
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        {
+            let mut holds = self
+                .caches
+                .holds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(count) = holds.get_mut(&self.key) {
+                *count -= 1;
+                if *count == 0 {
+                    holds.remove(&self.key);
+                }
+            }
+        }
+        // As a description's last close: the removal looks again after it
+        // puts its end off, so one of the two sees the other.
+        if self.caches.notify.waiting() && !self.caches.held(self.key) {
+            self.caches.notify.last_closed(self.key);
+        }
+    }
 }
 
 /// An open description in [`PageCaches`]' list: its file's handle, where
@@ -73,22 +118,62 @@ impl Drop for WriteAccess {
                 writes.remove(&self.key);
             }
         }
+        drop(writes);
+        // A program a process ran holds its file (Linux's `exe_file`): a
+        // removed one ends once no process runs it, as with a last close.
+        if self.change < 0 && self.caches.notify.waiting() && !self.caches.held(self.key) {
+            self.caches.notify.last_closed(self.key);
+        }
     }
 }
 
 impl PageCaches {
-    /// Whether a description of file `key` is open.
+    /// Whether a description of file `key` is open, a [`Hold`] holds it,
+    /// or a program runs from it.
     fn held(&self, key: Key) -> bool {
-        let opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
-        opens.values().any(|(file, device, found)| {
-            if let Some(&known) = found.get() {
-                return known == key;
-            }
-            let Some(stat) = file.upgrade().and_then(|file| file.stat().ok()) else {
-                return false;
-            };
-            *found.get_or_init(|| (device.number(), stat.inode)) == key
-        })
+        let opened = {
+            let opens = self.opens.lock().unwrap_or_else(PoisonError::into_inner);
+            opens.values().any(|(file, device, found)| {
+                if let Some(&known) = found.get() {
+                    return known == key;
+                }
+                let Some(stat) = file.upgrade().and_then(|file| file.stat().ok()) else {
+                    return false;
+                };
+                *found.get_or_init(|| (device.number(), stat.inode)) == key
+            })
+        };
+        opened
+            || self
+                .holds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(&key)
+            || self
+                .writes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key)
+                .is_some_and(|&count| count < 0)
+    }
+    /// A hold on the file at `path` in `fs`, by the key inotify knows it
+    /// by; none if it cannot be looked at.
+    pub(crate) fn hold(self: &Arc<Self>, fs: &dyn FileSystem, path: &[u8]) -> Option<Hold> {
+        let path = crate::files::resolved_in(fs, path)?;
+        let stat = fs.metadata(&path, false).ok()?;
+        Some(self.hold_of((mount_device(&fs.mounts(), &path), stat.inode)))
+    }
+    fn hold_of(self: &Arc<Self>, key: Key) -> Hold {
+        *self
+            .holds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key)
+            .or_default() += 1;
+        Hold {
+            caches: Arc::clone(self),
+            key,
+        }
     }
     /// The cache of `key`, made now, with the file's `size`, if the file has
     /// none.

@@ -4702,6 +4702,77 @@ mod inotify {
         );
     }
     #[test]
+    fn a_removed_working_directory_ends_when_no_process_is_in_it() {
+        let mut f = fixture();
+        let fd = f.ret(INIT1, &[IN_NONBLOCK]);
+        let home = put(&f, DATA, b"/tmp/home");
+        let tmp = put(&f, DATA + 0x40, b"/tmp");
+        assert_eq!(f.ret(83, &[home, 0o700]), 0);
+        assert_eq!(f.ret(80, &[home]), 0);
+        let wd = f.ret(ADD, &[fd, home, 0x400]) as i32;
+        // A copy of the working directory, as a child without CLONE_FS
+        // gets, holds it too.
+        let child = f.kernel.files.for_clone(true, false);
+        assert_eq!(f.ret(84, &[home]), 0);
+        assert_eq!(masks(&events(&mut f, fd)), []);
+        assert_eq!(f.ret(80, &[tmp]), 0);
+        assert_eq!(masks(&events(&mut f, fd)), []);
+        drop(child);
+        assert_eq!(
+            masks(&events(&mut f, fd)),
+            [(wd, 0x400, &b""[..]), (wd, 0x8000, b"")]
+        );
+        // One no process is in goes at once.
+        assert_eq!(f.ret(83, &[home, 0o700]), 0);
+        let wd = f.ret(ADD, &[fd, home, 0x400]) as i32;
+        assert_eq!(f.ret(84, &[home]), 0);
+        assert_eq!(
+            masks(&events(&mut f, fd)),
+            [(wd, 0x400, &b""[..]), (wd, 0x8000, b"")]
+        );
+    }
+    #[test]
+    fn a_removed_program_ends_when_no_process_runs_it() {
+        let mut f = fixture();
+        let fd = f.ret(INIT1, &[IN_NONBLOCK]);
+        let prog = put(&f, DATA, b"/tmp/prog");
+        let d = f.ret(2, &[prog, 0o101, 0o700]);
+        assert_eq!(f.ret(3, &[d]), 0);
+        let wd = f.ret(ADD, &[fd, prog, 0x400]) as i32;
+        // What exec keeps while the program runs (`exe_file`).
+        let running = crate::processes::deny_writes(&f.kernel.files, b"/tmp/prog")
+            .unwrap()
+            .unwrap();
+        assert_eq!(f.ret(87, &[prog]), 0);
+        assert_eq!(masks(&events(&mut f, fd)), []);
+        drop(running);
+        assert_eq!(
+            masks(&events(&mut f, fd)),
+            [(wd, 0x400, &b""[..]), (wd, 0x8000, b"")]
+        );
+    }
+    #[test]
+    fn a_removed_interpreter_ends_when_nothing_maps_it() {
+        let mut f = fixture();
+        let fd = f.ret(INIT1, &[IN_NONBLOCK]);
+        let ld = put(&f, DATA, b"/tmp/ld.so");
+        let d = f.ret(2, &[ld, 0o101, 0o755]);
+        assert_eq!(f.ret(3, &[d]), 0);
+        let wd = f.ret(ADD, &[fd, ld, 0x400]) as i32;
+        // What the interpreter's mappings keep, which a fork's copy of them
+        // shares.
+        let mapped = f.kernel.files.interpreter_keep(b"/tmp/ld.so").unwrap();
+        let forked = Arc::clone(&mapped);
+        assert_eq!(f.ret(87, &[ld]), 0);
+        drop(mapped);
+        assert_eq!(masks(&events(&mut f, fd)), []);
+        drop(forked);
+        assert_eq!(
+            masks(&events(&mut f, fd)),
+            [(wd, 0x400, &b""[..]), (wd, 0x8000, b"")]
+        );
+    }
+    #[test]
     fn the_queue_merges_repeats_and_overflows_once() {
         let mut f = fixture();
         let fd = f.ret(INIT1, &[IN_NONBLOCK]);

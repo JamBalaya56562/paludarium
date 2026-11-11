@@ -420,6 +420,11 @@ impl Kernel {
         Ok((loaded, script))
     }
 
+    /// What the mappings of the first program's ELF interpreter, at `path`,
+    /// keep while they last: a hold on its file, as Linux's hold theirs.
+    pub fn interpreter_keep(&self, path: &[u8]) -> Option<paludarium_loader::Keep> {
+        self.files.interpreter_keep(path)
+    }
     /// Records `path` as the program the first process runs, as
     /// `/proc/self/exe` names it: with its symbolic links resolved.
     pub fn set_executable(&self, path: &[u8]) {

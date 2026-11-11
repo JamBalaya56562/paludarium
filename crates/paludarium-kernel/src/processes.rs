@@ -3505,7 +3505,8 @@ impl Kernel {
             // Denied only while it loads, as `load_elf_binary` gives it back.
             drop(deny_writes(&self.files, &path)?);
             readable &= may_read;
-            Ok(path)
+            let keep = self.files.interpreter_keep(&path);
+            Ok((path, keep))
         };
         let fs = &*self.files.fs;
         let image = match &held {

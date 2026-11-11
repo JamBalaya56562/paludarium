@@ -16,7 +16,7 @@ use paludarium_host::Host;
 use paludarium_jit::{CodeCache, NoopCodeCache};
 pub use paludarium_kernel::{InvalidRule, NetworkPolicy};
 use paludarium_kernel::{Kernel, SignalInbox};
-use paludarium_loader::{StartInfo, load};
+use paludarium_loader::{StartInfo, load_with};
 use paludarium_mmu::{AddressSpace, MemoryMeter};
 #[cfg(test)]
 use paludarium_types::signal;
@@ -442,7 +442,13 @@ impl Session {
             Some(max) => AddressSpace::new().with_memory_meter(Arc::new(MemoryMeter::new(max))),
             None => AddressSpace::new(),
         };
-        let image = load(&*fs, &loaded, &start, &mut mem).map_err(|error| {
+        // As `load` finds an interpreter, whose mappings hold its file.
+        let image = load_with(&*fs, &loaded, &start, &mut mem, &mut |name| {
+            let path = paludarium_vfs::normalize_path(name)?;
+            let keep = kernel.interpreter_keep(&path);
+            Ok((path, keep))
+        })
+        .map_err(|error| {
             if mem.take_out_of_memory() {
                 Error::new(
                     ErrorKind::InvalidProgram,
