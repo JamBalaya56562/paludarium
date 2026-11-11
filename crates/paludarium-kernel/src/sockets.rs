@@ -922,11 +922,12 @@ pub(crate) fn message_header(
     }
     // recvmsg sees that its buffers can be written before it takes the data,
     // which a failed copy would leave in place. sendmsg's are only checked as
-    // access_ok does, as they are copied after the address is checked.
+    // access_ok does, as they are copied after the address is checked: that
+    // check is iovecs_checked's own, so the closure does nothing more.
     let iov = if write {
         crate::files::iovecs(c, word(16), word(24), true)?
     } else {
-        crate::files::iovecs_checked(c, word(16), word(24), access_ok)?
+        crate::files::iovecs_checked(c, word(16), word(24), |_, _| Ok(()))?
     };
     Ok(MessageHeader {
         name: (name != 0 && name_len != 0).then_some((name, name_len)),
@@ -1202,7 +1203,12 @@ pub(crate) fn user_buffer(at: u64, len: u64) -> Result<usize, Errno> {
 /// Linux's `access_ok`: EFAULT for `len` bytes at `at` that reach past the
 /// user half.
 pub(crate) fn access_ok(at: u64, len: usize) -> Result<(), Errno> {
-    if at > TASK_SIZE_MAX.saturating_sub(len as u64) {
+    access_ok_u64(at, len as u64)
+}
+/// [`access_ok`] for a length that may not fit a `usize` (WebAssembly's 32
+/// bits), such as an iovec's before it is cut.
+pub(crate) fn access_ok_u64(at: u64, len: u64) -> Result<(), Errno> {
+    if at > TASK_SIZE_MAX.saturating_sub(len) {
         return Err(Errno::EFAULT);
     }
     Ok(())
