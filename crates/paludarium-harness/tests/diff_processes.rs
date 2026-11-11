@@ -165,6 +165,7 @@ mod linux {
                     | "mqueue-poll"
                     | "mqueue-notify"
                     | "mqueue-fork"
+                    | "mqueue-sysctl"
                     | "netlink"
                     | "unix-interfaces"
                     | "addresses"
@@ -332,6 +333,7 @@ mod linux {
         mqueue_poll => ("mqueue-poll","mqueue"),
         mqueue_notify => ("mqueue-notify","mqueue"),
         mqueue_fork => ("mqueue-fork","mqueue"),
+        mqueue_sysctl => ("mqueue-sysctl","mqueue"),
         processes_pgid_exec => ("pgid-exec","process"),
         processes_priority => ("priority","process"),
         processes_sysinfo => ("sysinfo","process"),
