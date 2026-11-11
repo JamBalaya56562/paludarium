@@ -331,13 +331,19 @@ verified.
   namespace has no interface but its loopback (no `veth` pairs to reach
   another), and the interface requests and netlink change no other flag
   than `IFF_UP`. The first namespace shows `lo` alone too, where Linux
-  shows the host's interfaces. Netlink has only `NETLINK_ROUTE`
-  and `NETLINK_GENERIC` (`EPROTONOSUPPORT` for the rest); generic netlink
-  has no family but `nlctrl`, where Linux has those of the host's kernel
-  and modules (`ethtool`, `nl80211`, `devlink` and others), so a lookup of
-  one is `ENOENT` and a socket has 64 groups however many those take.
-  Of `NETLINK_ROUTE` there are only
-  the link, address and route requests: neighbours, rules, queueing
+  shows the host's interfaces. Netlink has only `NETLINK_ROUTE`,
+  `NETLINK_SOCK_DIAG` and `NETLINK_GENERIC` (`EPROTONOSUPPORT` for the
+  rest). Socket diagnostics tell only of AF_UNIX sockets: AF_INET and
+  AF_INET6 (`inet_diag`, as `ss -t` and `ss -u` ask), AF_NETLINK and
+  AF_PACKET have no handler (`ENOENT`), and `TCPDIAG_GETSOCK` is
+  `EOPNOTSUPP`. A dump of AF_UNIX sockets lists them oldest first, where
+  Linux's order follows its hash table, and what a socket sent that waits
+  is counted as its send buffer is charged here, where Linux counts its
+  buffers' true sizes. Generic netlink has no family but `nlctrl`, where
+  Linux has those of the host's kernel and modules (`ethtool`,
+  `nl80211`, `devlink` and others), so a lookup of one is `ENOENT` and a
+  socket has 64 groups however many those take. Of `NETLINK_ROUTE` there
+  are only the link, address and route requests: neighbours, rules, queueing
   disciplines and the rest are `EOPNOTSUPP`, as are an input route
   lookup (`RTA_IIF`, as `ip route get ... iif` sends), a non-dump
   `RTM_GETADDR`, renaming `lo` and setting any other attribute of it. A
