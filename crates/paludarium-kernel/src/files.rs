@@ -201,11 +201,20 @@ impl Files {
         *self.cwd.lock().unwrap_or_else(PoisonError::into_inner) = path;
         Ok(())
     }
-    pub(crate) fn release_descriptors(&mut self) {
-        // Detach this worker's table reference without closing a table still
-        // shared by live CLONE_FILES siblings.
-        self.fds = Arc::new(Mutex::new(BTreeMap::new()));
+    /// Detaches this worker's table reference without closing a table still
+    /// shared by live CLONE_FILES siblings; the last task to let go gets the
+    /// files the table held (`put_files_struct`), deciding that with the
+    /// release itself so that two tasks ending together cannot both miss it.
+    pub(crate) fn release_descriptors(&mut self) -> Vec<Arc<dyn FileHandle>> {
+        let fds = std::mem::replace(&mut self.fds, Arc::new(Mutex::new(BTreeMap::new())));
         self.reserved = Arc::default();
+        Arc::into_inner(fds).map_or_else(Vec::new, |fds| {
+            fds.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .into_values()
+                .map(|descriptor| descriptor.file)
+                .collect()
+        })
     }
     pub(crate) fn umask(&self) -> u32 {
         self.umask.load(Ordering::SeqCst)
