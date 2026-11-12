@@ -178,6 +178,8 @@ pub struct Processes {
     pub(crate) mqueue_charges: Arc<crate::mqueue::Charges>,
     /// The queues `/dev/mqueue` shows: the first IPC namespace's.
     pub(crate) mqueue_mount: crate::mqueue::Queues,
+    /// The cookies `kcmp` hides objects behind, drawn once.
+    kcmp_cookies: std::sync::OnceLock<[[u64; 2]; crate::kcmp::TYPES]>,
 }
 impl Processes {
     pub(crate) fn new(group: Arc<ThreadGroup>) -> Self {
@@ -197,6 +199,7 @@ impl Processes {
             cpus: Arc::default(),
             mqueue_charges: Arc::default(),
             mqueue_mount: group.namespaces(1).ipc.mq.clone(),
+            kcmp_cookies: std::sync::OnceLock::new(),
             entries: Mutex::new(BTreeMap::from([(
                 1,
                 Entry {
@@ -2000,6 +2003,7 @@ impl Kernel {
             247 => self.waitid(thread, mem, a),
             434 => self.pidfd_open(thread, a),
             424 => self.pidfd_send_signal(thread, a),
+            312 => self.kcmp(thread, mem, a),
             129 => self.sigqueueinfo(thread, mem, a),
             297 => self.tgsigqueueinfo(thread, mem, a),
             // The IDs these give are as the caller's PID namespace numbers
@@ -2204,6 +2208,10 @@ impl Kernel {
             }
             let mut sched = found.group.sched(found.tid);
             sched.io = Some(ioprio as u16);
+            // set_task_ioprio gives a thread without an I/O context one.
+            if sched.io_context == 0 {
+                sched.io_context = scheduling::new_io_context();
+            }
             found.group.set_sched(found.tid, sched);
             result = Ok(0);
         }
@@ -3095,6 +3103,67 @@ impl Kernel {
             }
             self.wait_for_children(ticket)?;
         }
+    }
+    /// `kcmp(pid1, pid2, type, idx1, idx2)`: each number, an `int`, names
+    /// a thread as the caller's PID namespace numbers them (`ESRCH`), as
+    /// Linux's `find_task_by_vpid`; the caller's own thread is taken as it
+    /// is now, and another as of its last checkpoint. [`crate::kcmp`] does
+    /// the rest.
+    fn kcmp(&self, thread: &Thread, mem: &AddressSpace, a: [u64; 6]) -> Result<u64, Errno> {
+        let space = self.pid_space(thread.tid);
+        let find = |number: u64| -> Option<crate::kcmp::Task> {
+            let tid = space.task(u32::try_from(number as i32).ok().filter(|&n| n > 0)?)?;
+            if tid == thread.tid {
+                let public = crate::threads::PublicThread {
+                    credentials: thread.state.credentials.clone(),
+                    memory: Some(mem.view()),
+                    files: self.files.view(),
+                    ..Default::default()
+                };
+                let dumpable = self.processes.view(self.process.pid)?.dumpable;
+                return Some(crate::kcmp::Task::new(
+                    tid,
+                    Arc::clone(&self.group),
+                    false,
+                    dumpable,
+                    public,
+                ));
+            }
+            let pid = match self.processes.view(tid) {
+                Some(_) => tid,
+                None => self.processes.thread_leader(tid)?,
+            };
+            let view = self.processes.view(pid)?;
+            let public = view.group.public(tid)?;
+            Some(crate::kcmp::Task::new(
+                tid,
+                Arc::clone(&view.group),
+                view.zombie,
+                view.dumpable,
+                public,
+            ))
+        };
+        let (Some(first), Some(second)) = (find(a[0]), find(a[1])) else {
+            return Err(Errno(3)); // ESRCH
+        };
+        let cookies = self.processes.kcmp_cookies.get_or_init(|| {
+            let mut random = [0; crate::kcmp::TYPES * 16];
+            // Linux draws them at boot and kcmp never fails for want of
+            // them: without the host's bytes they come from std's randomly
+            // keyed hasher, never all zeros.
+            if self.host.random_bytes(&mut random).is_err() {
+                crate::kcmp::fallback_random(&mut random);
+            }
+            crate::kcmp::cookies(&random)
+        });
+        crate::kcmp::compare(
+            cookies,
+            (&self.group, &thread.state.credentials),
+            mem,
+            [&first, &second],
+            a[2] as i32,
+            [a[3], a[4]],
+        )
     }
     /// `pidfd_open(pid, flags)`: a close-on-exec pidfd for a process.
     /// `PIDFD_THREAD` is accepted but still names the whole process.
