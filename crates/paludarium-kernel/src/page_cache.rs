@@ -40,6 +40,9 @@ pub(crate) struct PageCaches {
     writes: Mutex<HashMap<Key, i64>>,
     /// The machine's inotify watches, which its files' changes are told to.
     pub(crate) notify: Arc<crate::inotify::Notifier>,
+    /// Whether any of the machine's files was ever made immutable or
+    /// append-only ([`crate::files::attributes::any_flagged`]).
+    pub(crate) flagged: std::sync::atomic::AtomicBool,
     /// The open descriptions of the machine's files (each a
     /// [`CoherentFile`], by its handle), which keep a removed file there
     /// for inotify until the last is closed, as Linux's dentry keeps it.
@@ -902,6 +905,13 @@ impl FileHandle for CoherentFile {
         }
         result
     }
+    fn with_attributes(&self, f: &mut dyn FnMut(&mut u32)) -> Result<(), Errno> {
+        let (result, changed) = crate::inotify::changing_xattrs(|| self.inner.with_attributes(f));
+        if result.is_ok() && changed {
+            self.changed(crate::inotify::ATTRIB);
+        }
+        result
+    }
     fn set_mode(&self, mode: u32) -> Result<(), Errno> {
         self.inner.set_mode(mode)?;
         self.changed(crate::inotify::ATTRIB);
@@ -1134,6 +1144,21 @@ impl HostFs for CoherentFs {
     ) -> Result<(), Errno> {
         let (result, changed) =
             crate::inotify::changing_xattrs(|| self.inner.with_xattrs(path, follow, f));
+        if result.is_ok() && changed {
+            self.caches
+                .notify
+                .changed(&*self.inner, path, follow, crate::inotify::ATTRIB);
+        }
+        result
+    }
+    fn with_attributes(
+        &self,
+        path: &[u8],
+        follow: bool,
+        f: &mut dyn FnMut(&mut u32),
+    ) -> Result<(), Errno> {
+        let (result, changed) =
+            crate::inotify::changing_xattrs(|| self.inner.with_attributes(path, follow, f));
         if result.is_ok() && changed {
             self.caches
                 .notify
