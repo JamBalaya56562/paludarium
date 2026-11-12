@@ -241,6 +241,7 @@
     {"name":"seccomp","binary":"process"},
     {"name":"seccomp-notify","binary":"process"},
     {"name":"process-vm","binary":"process"},
+    {"name":"page-nodes","binary":"process"},
     {"name":"pidfd-getfd","binary":"process"},
     {"name":"ignored-signal-wait","binary":"process"},
     {"name":"mmsg","binary":"process"},
