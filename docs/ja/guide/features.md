@@ -678,7 +678,8 @@ paludarium が目指すのは、実際のプログラムを本物の Linux と�
   変えます（`mq_open` は `O_LARGEFILE` を付けないので 2^31 − 1 バイトを超えると `EINVAL`、
   書き込みのアクセスがなくても `EINVAL`）。`lseek` の終わりはそのサイズです。`fstatfs` は
   `mqueue` ファイルシステム（`MQUEUE_MAGIC`、ブロックは 1 ページ、名前は 255 バイトまで）を
-  示します。`/proc/self/fd` のリンクは `/<名前>` で、消された
+  示します。`/proc/self/fd` のリンクを開くと同じキューになり、アクセスモードと `O_TRUNC` の
+  権限を確かめます（`EACCES`。`O_DIRECTORY` では `ENOTDIR`）。`/proc/self/fd` のリンクは `/<名前>` で、消された
   あとは空白と `(deleted)` が後ろに付きます。メッセージは優先度の高い順（32768 未満。それ以外は
   `EINVAL`）に、同じ優先度なら送った順に出てきます。`mq_msgsize` より小さいバッファーへの
   受信は `EMSGSIZE` で、それより長い送信も同じです。空のキューからの受信といっぱいの
@@ -697,7 +698,11 @@ paludarium が目指すのは、実際のプログラムを本物の Linux と�
   netlink ソケット（`EBADF`、`ENOTSOCK`、ほかのソケットなら `EINVAL`）へ、最後の
   バイトが 1（`NOTIFY_WOKENUP`）のデータグラムとして送ります。メッセージなしで登録が
   終わるときは 2（`NOTIFY_REMOVED`）です。C ライブラリーの補助スレッドはこれを読んで
-  `sigev_notify_function` を始めます。キューのどの記述子を閉じても、またはプロセスが
+  `sigev_notify_function` を始めます。クッキーは、Linux の `netlink_attachskb` と同じく、
+  登録のときから受け取られるまで、そのソケットの受信バッファーの空きを取ります。ソケットに
+  何かがあり、クッキーの空きがなければ、`mq_notify` はキューを引く前に、受信で空きができるまで
+  待ちます（シグナルで待ちは終わり `EINTR`。`SA_RESTART` なら再開します）。そのあと失敗すれば
+  空きを返します。キューのどの記述子を閉じても、またはプロセスが
   終わっても、Linux の `mqueue_flush_file` と同じくそのプロセスの登録は外れます。
 - `/dev/mqueue` は、Linux の起動時に systemd がマウントするのと同じく、呼び出し元がどの IPC
   名前空間にいても、最初の IPC 名前空間の `mqueue` ファイルシステムです。誰でも書ける
@@ -714,8 +719,22 @@ paludarium が目指すのは、実際のプログラムを本物の Linux と�
   同じです（`EPERM`、`EACCES`）。ただし、パスへの truncate は更新時刻を変えず、2^31 − 1
   バイトまで伸ばせます（それを超えると、スーパーブロックの `s_maxbytes` のとおり `EFBIG`）。
   `statfs` は `mqueue` ファイルシステムを示します。ルートのサイズはエントリー（`.`、`..`、
-  それぞれのキュー）ごとに 20 バイト（`DIRENT_SIZE`）で、更新時刻はそこで最後にキューを
-  作ったか消したときです。
+  それぞれのキュー）ごとに 20 バイト（`DIRENT_SIZE`）で、更新時刻は名前空間を作ったとき、
+  またはそこで最後にキューを作ったか消したときです。`/dev/mqueue` への `chmod`、`chown`、
+  `utimensat` と、それを開いたものへの `fchmod`、`fchown`、`futimens` はルートを変えます
+  （`truncate` は `EISDIR`）。そのモードが、ほかの者にできることを決めます。そこで名前を
+  引くには検索の権限が要り（`EACCES`）、開くには読む権限が要ります。キューを作るとき
+  （`mq_open` も）と消すときは書き込みと検索の権限が要ります（`may_create`、`may_delete`）。
+  スティッキービットがあれば、消せるのはキューの所有者、ルートの所有者、`CAP_FOWNER` を
+  持つ者だけです。すでにあるキューの `mq_open` は検索しません（`lookup_noperm`）。その中での
+  `link` と `rename` は、ルートが断る前に Landlock が確かめます（`EACCES`）。ルートにある操作は、名前を引くこと、キューを作ること、消すことだけ
+  です。そこで空いている名前（使われていれば `EEXIST`。`/dev/mqueue` 自身も同じ）への `mkdir`、
+  `symlink`、通常ファイル以外の `mknod` は、Landlock の確認のあとで `EPERM` です。通常ファイル
+  （型 0 も）の `mknod` は、`vfs_create` と同じく既定の属性のキューを作ります。`link` と
+  `rename` は `do_linkat` と `do_renameat2` と同じく名前を引き（`ENOENT`、`EEXIST`。
+  `RENAME_NOREPLACE` と `RENAME_EXCHANGE` もそのとおり）、ほかのマウントとの間では `EXDEV`
+  （`rename` は名前を引く前）、その中では `EPERM` です。ただし、名前をそれ自身へ `rename`
+  すると何もせずに成功します。
 - `sched_getaffinity` では、ゲストのどのスレッドもホストのすべての CPU で動けるとします。
   そのため、ゲストにはホストと同じ数の CPU が見えます（WebAssembly では 1 つ）。
   `sched_setaffinity` は、プロセスのスレッドのマスクを Linux と同じように読んで持ちます。

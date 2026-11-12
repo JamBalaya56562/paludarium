@@ -197,16 +197,17 @@ verified.
   - The POSIX message queues' filesystem cannot be mounted anywhere else:
     `/dev/mqueue` always shows the first IPC namespace's, and
     `/proc/self/mountinfo` does not list it. Through it, `open`, `stat`,
-    `access`, `getdents`, `unlink`, `rmdir`, `statfs`, and `chmod`,
-    `chown`, `utimensat` and `truncate` of a queue work as on Linux; the
-    calls that make or move a name there (`mkdir`, `mknod`, `symlink`,
-    `link`, `rename`) and those that change the root itself do not do what
-    Linux's would. The root's modification time starts when it is first
-    used, where Linux's is when the filesystem was mounted.
-  - A `SIGEV_THREAD` cookie goes to its socket even when the socket's
-    receive buffer is full, where Linux's `mq_notify` first waits for room:
-    Linux counts the cookie against that buffer from the registration on,
-    by its `truesize`, which the emulator's netlink sockets do not keep.
+    `access`, `getdents`, `unlink`, `rmdir`, `statfs`, `mkdir`, `mknod`,
+    `symlink`, `link`, `rename`, `chmod`, `chown`, `utimensat` and
+    `truncate` work as on Linux. The first namespace's root has the host's
+    boot time until a queue is made or unlinked there, where Linux's is
+    when the kernel made it as it booted, a little later.
+  - A `SIGEV_THREAD` cookie takes 960 bytes of its netlink socket's
+    receive buffer, its `truesize` on the CI runner's kernel, while the
+    socket's other datagrams take their length, where Linux counts their
+    `truesize` too; and a socket that dropped a datagram for want of room
+    is not held congested until it is emptied, as Linux's is
+    (`NETLINK_S_CONGESTED`), so a waiting `mq_notify` may register sooner.
   - A `/proc/sys/fs/mqueue` file checks who may write it when it is opened,
     where Linux checks the writer again at each write, and it reports its
     value's length as its size, where Linux reports 0.

@@ -761,7 +761,9 @@ kernel.
   end `lseek` finds is that size, `fstatfs` reports the `mqueue`
   filesystem (`MQUEUE_MAGIC`, a page per block, 255-byte names), and its
   link in `/proc/self/fd` is
-  `/<name>`, followed by a space and `(deleted)` once unlinked. Messages come highest
+  `/<name>`, followed by a space and `(deleted)` once unlinked, which an
+  open follows to the same queue, with its permissions for the access
+  mode and `O_TRUNC` (`EACCES`, and `ENOTDIR` with `O_DIRECTORY`). Messages come highest
   priority first (below 32768, `EINVAL`), in the order sent within one. A
   receive into a buffer smaller than `mq_msgsize` is `EMSGSIZE`, and so is
   a longer send. A receive from an empty queue and a send to a full one
@@ -783,7 +785,13 @@ kernel.
   socket) as a datagram whose last byte is 1 (`NOTIFY_WOKENUP`), or 2
   (`NOTIFY_REMOVED`) when the registration ends without a message, which is
   what the C libraries' helper threads read to start the
-  `sigev_notify_function`. Closing any descriptor of the queue, or ending,
+  `sigev_notify_function`. The cookie takes room in that socket's receive
+  buffer from the registration on, as Linux's `netlink_attachskb` charges
+  it, until it is received: while the socket holds something and has no
+  room for it, `mq_notify` waits, before it looks the queue up, until a
+  receive makes room (a signal ends the wait, `EINTR`, unless
+  `SA_RESTART` restarts it), and gives the room back if it then fails.
+  Closing any descriptor of the queue, or ending,
   drops its process's registration, as Linux's `mqueue_flush_file`.
 - `/dev/mqueue` is the first IPC namespace's `mqueue` filesystem, as
   systemd mounts it when Linux boots, whatever IPC namespace the caller is
@@ -804,8 +812,26 @@ kernel.
   time and may reach 2^31 − 1 bytes (`EFBIG` past them, as the
   superblock's `s_maxbytes`), and `statfs` reports the `mqueue`
   filesystem. The root's size is 20 bytes for each entry (`.`, `..` and
-  each queue, `DIRENT_SIZE`), and its modification time is when a queue
-  was last made or unlinked there.
+  each queue, `DIRENT_SIZE`), and its modification time is when its
+  namespace was made, or a queue was last made or unlinked there.
+  `chmod`, `chown` and `utimensat` of `/dev/mqueue`, and `fchmod`,
+  `fchown` and `futimens` of an open of it, change the root (a
+  `truncate` is `EISDIR`), and its mode then rules what others may do:
+  a lookup of a name there searches it (`EACCES`), opening it reads it,
+  making a queue (`mq_open` too) and unlinking one write and search it
+  (`may_create`, `may_delete`), the sticky bit limits unlinking to the
+  queue's owner, the root's or `CAP_FOWNER`, and `mq_open` of a queue
+  that is there does not search it (`lookup_noperm`). Landlock checks a
+  `link` or `rename` within it (`EACCES`) before the root refuses it. The root has no operations but to look
+  up, make a queue and unlink one: a new name there that is free (else
+  `EEXIST`, as `/dev/mqueue` itself is) gives `mkdir`, `symlink` and
+  `mknod` of anything but a regular file `EPERM`, after Landlock's check,
+  and `mknod` of a regular file (or of type 0) makes a queue of the
+  default attributes, as `vfs_create` does. `link` and `rename` look the
+  names up as `do_linkat` and `do_renameat2` do (`ENOENT`, `EEXIST`, with
+  `RENAME_NOREPLACE` and `RENAME_EXCHANGE` as there), give `EXDEV` to or
+  from another mount (`rename` before it looks the names up), and `EPERM`
+  within it, but for a `rename` of a name onto itself, which does nothing.
 - `sched_getaffinity` lets every guest thread run on each of the host's CPUs,
   so the guest sees as many CPUs as the host has (one in WebAssembly).
   `sched_setaffinity` keeps a mask for a thread of the process, as Linux
