@@ -6041,7 +6041,8 @@ static long vf_pwritev2(int fd, const void *buf, size_t len, long offset, long f
 }
 /* preadv2 and pwritev2 with their flags (RWF_DONTCACHE and RWF_NOSIGNAL
  * as Linux master has them), and epoll_pwait2, as Linux 6.12 has it. A
- * regular file's RWF_NOWAIT depends on its filesystem, so it is left out. */
+ * regular file's RWF_NOWAIT and RWF_DONTCACHE depend on its file system, so
+ * they are compared with what fstatfs says that file system takes. */
 static int vector_flags_case(void) {
     char path[] = "/tmp/vector-flags-XXXXXX";
     int fd = mkstemp(path);
@@ -6091,6 +6092,22 @@ static int vector_flags_case(void) {
     printf("noappend at=%ld pos=%ld past=%ld here=%ld moved=%ld plain=%ld read=%ld contents=%.*s\n",
            na_at, na_pos, na_past, na_here, na_moved, plain_at, na_read, (int)(r > 0 ? r : 0), all);
     close(app);
+    /* A regular file's RWF_NOWAIT and RWF_DONTCACHE are its file system's,
+     * as Linux master's ext4, xfs, btrfs and f2fs have them (any other takes
+     * neither). The case prints whether the file's own file system, as
+     * fstatfs names it, gives what that table says, which holds on CI's and
+     * the emulator's file systems alike. */
+    struct statfs fsinfo;
+    long kind = fstatfs(fd, &fsinfo) == 0 ? (long)fsinfo.f_type : -1;
+    long want_read = -EOPNOTSUPP, want_write = -EOPNOTSUPP, want_dontcache = -EOPNOTSUPP;
+    if (kind == 0xef53) want_read = 2, want_dontcache = 2;
+    if (kind == 0x58465342) want_read = want_write = want_dontcache = 2;
+    if (kind == 0x9123683e || kind == (long)0xf2f52010) want_read = want_write = 2;
+    long got_read = vf_preadv2(fd, got, 2, 0, 0x8);
+    long got_write = vf_pwritev2(fd, "nw", 2, 0, 0x8);
+    long got_dontcache = vf_preadv2(fd, got, 2, 0, 0x80);
+    printf("by-file-system nowait-read=%d nowait-write=%d dontcache=%d\n", got_read == want_read,
+           got_write == want_write, got_dontcache == want_dontcache);
     close(fd);
     /* A pipe reads at the position only, and does not wait with NOWAIT. */
     int p[2];
@@ -6105,9 +6122,9 @@ static int vector_flags_case(void) {
     printf("socket empty=%ld eventfd empty=%ld\n", vf_preadv2(sv[0], got, 8, -1, 0x8),
            vf_preadv2(counter, got, 8, -1, 0x8));
     /* RWF_DONTCACHE needs a file system with it, which a pipe, a socket and
-     * shmem (a memfd) are not; a regular file's depends on the filesystem,
-     * so it is left out. RWF_NOSIGNAL spares a write with no reader its
-     * SIGPIPE, and a read takes it. */
+     * shmem (a memfd) are not; a regular file's is checked above, by its
+     * file system. RWF_NOSIGNAL spares a write with no reader its SIGPIPE,
+     * and a read takes it. */
     int shm = memfd_create("vf", 0);
     long dc_pipe = vf_pwritev2(p[1], "x", 1, -1, 0x80);
     long dc_socket = vf_preadv2(sv[0], got, 1, -1, 0x80);
