@@ -6255,6 +6255,7 @@ fn status(c: &Context<'_>) -> Vec<u8> {
                 .map(|(&n, _)| n),
         ),
         no_new_privs,
+        seccomp: c.group.seccomp_of(c.process.pid, &c.process.seccomp),
         credentials: &c.process.credentials,
         reader: &c.process.credentials.user,
     })
