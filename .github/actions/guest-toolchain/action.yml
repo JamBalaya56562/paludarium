@@ -81,9 +81,45 @@ runs:
         # One update serves the whole job, so the files the toolchain and the packages were
         # downloaded with all come from the lists the cache keeps.
         updated=
+        # An update has hung on a mirror until the job's 60 minutes ran out (2026-11-11), so
+        # each attempt is bounded. apt-get update exits 0 when a source is unreachable, so an
+        # attempt also fails when a package has no candidate in the lists it left. This looks
+        # only at the lists, not at dependencies or what is installed; a misspelled package
+        # fails it too and costs the three attempts. A later attempt goes without the Azure
+        # mirror when others are listed. Without lists nothing installs, so the last failure
+        # fails the job.
+        candidates() {
+          local package policy
+          # shellcheck disable=SC2086 # the packages are separate words
+          for package in $PACKAGES; do
+            # Not piped into grep -q, whose early exit could make apt-cache fail under pipefail.
+            policy="$(apt-cache policy "$package")"
+            if ! grep -q '^  Candidate: [^(]' <<< "$policy"; then
+              echo "apt's lists have no candidate for $package" >&2
+              return 1
+            fi
+          done
+        }
+        refresh() {
+          local attempt
+          for attempt in 1 2 3; do
+            if sudo timeout --kill-after=10 120 apt-get update && candidates; then
+              return 0
+            fi
+            echo "apt-get update failed, hit its limit of 120 seconds or left no candidate (attempt $attempt of 3)" >&2
+            if [ "$attempt" -eq 3 ]; then
+              return 1
+            fi
+            if [ -f "$mirrors" ] && grep -q 'azure\.archive\.ubuntu\.com' "$mirrors" &&
+              grep -qv 'azure\.archive\.ubuntu\.com' "$mirrors"; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$mirrors"
+            fi
+            sleep 15
+          done
+        }
         update() {
           if [ -z "$offline" ] && [ -z "$updated" ]; then
-            sudo apt-get update
+            refresh
             updated=1
           fi
         }
@@ -104,7 +140,7 @@ runs:
             fi
             echo "::warning::the cached apt files for this image are not enough; using the network"
             offline=
-            sudo apt-get update
+            refresh || return
             updated=1
           fi
           while true; do
