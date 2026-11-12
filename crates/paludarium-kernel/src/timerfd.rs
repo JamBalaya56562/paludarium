@@ -55,6 +55,7 @@ fn create(c: &mut Context<'_>, a: [u64; 6]) -> Result<u64, Errno> {
     let timer = Arc::new(TimerFile {
         host: Arc::clone(c.shared_host),
         clock,
+        clockid: a[0] as i32,
         state: Mutex::new(State::default()),
         flags: AtomicU32::new(2 | flags & NONBLOCK),
     });
@@ -94,6 +95,7 @@ fn settime(c: &mut Context<'_>, a: [u64; 6]) -> Result<u64, Errno> {
         let mut state = timer.lock(now);
         let old = state.setting(now);
         state.ticks = 0;
+        state.expired = None;
         state.deadline = (value != 0).then(|| {
             if a[1] & TIMER_ABSTIME != 0 {
                 value
@@ -103,6 +105,7 @@ fn settime(c: &mut Context<'_>, a: [u64; 6]) -> Result<u64, Errno> {
         });
         // Linux keeps the interval even when the zero value disarms the timer.
         state.interval = interval;
+        state.settime_flags = a[1] as u32 & (TIMER_ABSTIME | TIMER_CANCEL_ON_SET) as u32;
         old
     };
     if a[3] != 0 {
@@ -115,7 +118,13 @@ fn gettime(c: &mut Context<'_>, a: [u64; 6]) -> Result<u64, Errno> {
     let file = timer(c, a[0])?;
     let timer = as_timer(&file);
     let now = timer.host.clock(timer.clock)?;
-    let setting = timer.lock(now).setting(now);
+    let mut state = timer.lock(now);
+    let setting = state.setting(now);
+    // `timerfd_gettime` moves a periodic timer on (`hrtimer_forward_now`).
+    if state.interval != 0 {
+        state.expired = None;
+    }
+    drop(state);
     write_words(c.mem, a[1], &setting)?;
     Ok(0)
 }
@@ -129,6 +138,13 @@ struct State {
     ticks: u64,
     /// Bumped on every expiry, so edge-triggered epoll sees each one.
     input_epoch: u64,
+    /// The flags of the last `timerfd_settime` (`TFD_TIMER_ABSTIME`,
+    /// `TFD_TIMER_CANCEL_ON_SET`).
+    settime_flags: u32,
+    /// What Linux's `ctx->ticks` is while the timer has expired and no
+    /// read or `timerfd_gettime` has moved it on yet (`ctx->expired`): its
+    /// callback counted the first expiry only, and the timer stays at it.
+    expired: Option<u64>,
 }
 impl State {
     /// Counts the expirations up to `now`, rearming a periodic timer.
@@ -153,6 +169,9 @@ impl State {
                 n
             }
         };
+        if self.expired.is_none() {
+            self.expired = Some(self.ticks.saturating_add(1));
+        }
         self.ticks = self.ticks.saturating_add(expirations);
         self.input_epoch = self.input_epoch.wrapping_add(1);
     }
@@ -171,10 +190,40 @@ impl State {
 pub(crate) struct TimerFile {
     host: Arc<dyn Host>,
     clock: ClockId,
+    /// The clock as `timerfd_create` named it.
+    clockid: i32,
     state: Mutex<State>,
     flags: AtomicU32,
 }
 impl TimerFile {
+    /// What `/proc/self/fdinfo` adds for the timer, as Linux's
+    /// `timerfd_show`: its clock, the expirations not read, the settime
+    /// flags, and the time to the next expiry and the interval.
+    pub(crate) fn fdinfo(&self) -> Vec<u8> {
+        let Ok(state) = self.current() else {
+            return Vec::new();
+        };
+        let now = self.host.clock(self.clock).unwrap_or(0);
+        // An expired timer stays at its expiry until something moves it on.
+        let (ticks, remaining) = match state.expired {
+            Some(ticks) => (ticks, 0),
+            None => (
+                state.ticks,
+                state.deadline.map_or(0, |d| d.saturating_sub(now)),
+            ),
+        };
+        format!(
+            "clockid: {}\nticks: {}\nsettime flags: 0{:o}\nit_value: ({}, {})\nit_interval: ({}, {})\n",
+            self.clockid,
+            ticks,
+            state.settime_flags,
+            remaining / 1_000_000_000,
+            remaining % 1_000_000_000,
+            state.interval / 1_000_000_000,
+            state.interval % 1_000_000_000,
+        )
+        .into_bytes()
+    }
     /// The state with its expirations counted up to `now`.
     fn lock(&self, now: u64) -> std::sync::MutexGuard<'_, State> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -203,6 +252,7 @@ impl FileHandle for TimerFile {
         }
         buf[..8].copy_from_slice(&state.ticks.to_le_bytes());
         state.ticks = 0;
+        state.expired = None;
         Ok(8)
     }
     fn write(&self, _: &[u8]) -> Result<usize, Errno> {
@@ -241,6 +291,7 @@ mod tests {
         TimerFile {
             host: Arc::new(paludarium_host::testing::RecordingHost::new()),
             clock: ClockId::Realtime,
+            clockid: 0,
             state: Mutex::new(State::default()),
             flags: AtomicU32::new(2),
         }

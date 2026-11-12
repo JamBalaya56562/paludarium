@@ -2356,8 +2356,8 @@ fn readv(c: &mut Context<'_>, a: [u64; 6], flags: u32) -> Result<u64, Errno> {
 }
 
 /// [`readv`] of an inotify instance, which has no `read_iter`: Linux's
-/// `do_loop_readv_writev` reads each buffer in turn as [`read_guest`]
-/// (`crate::inotify::read_guest`) does, until one is not filled or fails;
+/// `do_loop_readv_writev` reads each buffer in turn as
+/// [`read_guest`](crate::inotify::read_guest) does, until one is not filled or fails;
 /// nothing to do for no bytes, and any flag but `RWF_HIPRI` `EOPNOTSUPP`.
 fn readv_instance(
     c: &mut Context<'_>,
@@ -6086,10 +6086,10 @@ fn own_file(c: &Context<'_>, entry: crate::proc::OwnEntry) -> Option<Vec<u8>> {
 /// `/proc/self/fdinfo/<n>` while descriptor `n` is open, as Linux's
 /// `seq_show` writes it: the description's position, its flags in octal
 /// (`F_GETFL`'s, and `O_CLOEXEC` for the descriptor), the ID of its mount
-/// (as `statx` gives it) and its inode; then, for an inotify instance, a line
-/// for each watch ([`crate::inotify::Instance::fdinfo`]). The lines other
-/// files add (eventfd's count, an epoll's targets, a signalfd's mask, the
-/// record locks) are not there.
+/// (as `statx` gives it) and its inode; then a `lock:` line for each record
+/// lock on the file ([`crate::record_locks::fdinfo`]), and the
+/// lines of an inotify instance, an eventfd, a signalfd, a timerfd or an
+/// epoll. `flock` locks have no lines: the file system keeps them.
 fn descriptor_info(c: &Context<'_>, n: u32) -> Option<Vec<u8>> {
     const O_CLOEXEC: u32 = 0o2000000;
     let d = c.files.descriptor(u64::from(n)).ok()?;
@@ -6100,10 +6100,57 @@ fn descriptor_info(c: &Context<'_>, n: u32) -> Option<Vec<u8>> {
     let mount = mount_id(descriptor_device(c, &d));
     let mut out =
         format!("pos:\t{pos}\nflags:\t0{flags:o}\nmnt_id:\t{mount}\nino:\t{ino}\n").into_bytes();
+    out.extend(crate::record_locks::fdinfo(c, &d));
+    let any = d.file.as_any();
     if let Some(instance) = crate::inotify::of(&d.file) {
         out.extend(instance.fdinfo());
+    } else if let Some(counter) = any.and_then(|a| a.downcast_ref::<crate::events::EventCounter>())
+    {
+        out.extend(counter.fdinfo());
+    } else if let Some(signals) = any.and_then(|a| a.downcast_ref::<crate::signalfd::SignalFile>())
+    {
+        out.extend(signals.fdinfo());
+    } else if let Some(timer) = any.and_then(|a| a.downcast_ref::<crate::timerfd::TimerFile>()) {
+        out.extend(timer.fdinfo());
+    } else if let Some(epoll) = any.and_then(|a| a.downcast_ref::<crate::epoll::EpollInstance>()) {
+        out.extend(epoll_fdinfo(c, epoll));
     }
     Some(out)
+}
+/// An epoll's lines in `/proc/self/fdinfo`, as Linux's `ep_show_fdinfo`
+/// writes one for each file it watches: the descriptor it was added with,
+/// the events, the data, and the file's position, inode and device (the
+/// device of a descriptor this process has of it, or 0). They come by
+/// descriptor, where Linux's order follows its files' addresses.
+fn epoll_fdinfo(c: &Context<'_>, epoll: &crate::epoll::EpollInstance) -> Vec<u8> {
+    let descriptors: Vec<Descriptor> = c
+        .files
+        .fds
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .values()
+        .cloned()
+        .collect();
+    let mut out = Vec::new();
+    for (fd, events, data, file) in epoll.targets() {
+        let pos = file.seek(0, 1).unwrap_or(0);
+        let ino = file.stat().map_or(0, |stat| stat.inode);
+        let device = descriptors
+            .iter()
+            .find(|d| Arc::ptr_eq(&d.file, &file))
+            .map_or(0, |d| descriptor_device(c, d));
+        // `new_encode_dev` undone, then `MKDEV`.
+        let major = (device >> 8) & 0xfff;
+        let minor = (device & 0xff) | ((device >> 12) & !0xff);
+        out.extend_from_slice(
+            format!(
+                "tfd: {fd:8} events: {events:8x} data: {data:16x}  pos:{pos} ino:{ino:x} sdev:{:x}\n",
+                major << 20 | minor
+            )
+            .as_bytes(),
+        );
+    }
+    out
 }
 /// The contents of a system-wide /proc file, from what `sysinfo` reports.
 fn system_file(c: &Context<'_>, entry: crate::proc::SystemEntry) -> Vec<u8> {
