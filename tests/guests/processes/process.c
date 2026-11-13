@@ -6085,6 +6085,90 @@ static int madvise_advice_case(void) {
     printf("dontneed-locked=%ld status=%d bytes=%d\n", r, status, p[2 * page]);
     return 0;
 }
+/* The VMAs of [start, end) /proc/self/maps lists. It allocates nothing, so
+ * that no new mapping lands in the range (a fork's MADV_DONTFORK hole). */
+static int advice_vmas(char *start, char *end) {
+    static char maps[1 << 16];
+    int fd = open("/proc/self/maps", O_RDONLY);
+    if (fd < 0) return -1;
+    size_t length = 0;
+    ssize_t got;
+    while (length < sizeof maps - 1 && (got = read(fd, maps + length, sizeof maps - 1 - length)) > 0)
+        length += got;
+    close(fd);
+    maps[length] = 0;
+    int count = 0;
+    for (char *line = maps; *line;) {
+        char *rest;
+        unsigned long from = strtoul(line, &rest, 16);
+        unsigned long to = *rest == '-' ? strtoul(rest + 1, NULL, 16) : 0;
+        if (from < (unsigned long)end && to > (unsigned long)start) count++;
+        char *next = strchr(line, '\n');
+        if (!next) break;
+        line = next + 1;
+    }
+    return count;
+}
+/* MADV_DONTFORK, MADV_WIPEONFORK and MADV_DONTDUMP, which change the flags
+ * of their VMAs, and what a fork's child gets of them. */
+static char advice_data[2 * 4096] __attribute__((aligned(4096))) = {1};
+static int madvise_fork_case(void) {
+    long page = 4096;
+    char *guard = mmap(NULL, 6 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *shared = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (guard == MAP_FAILED || shared == MAP_FAILED) return 80;
+    /* Its own VMAs, apart from any other mapping. */
+    munmap(guard, page);
+    munmap(guard + 5 * page, page);
+    char *p = guard + page;
+    for (int i = 0; i < 4; i++) p[i * page] = i + 1;
+    long dontfork = advice_errno(madvise(p + page, page, MADV_DONTFORK));
+    long wipe = advice_errno(madvise(p + 2 * page, page, MADV_WIPEONFORK));
+    long dontdump = advice_errno(madvise(p + 3 * page, page, MADV_DONTDUMP));
+    printf("dontfork=%ld wipeonfork=%ld dontdump=%ld vmas=%d\n", dontfork, wipe, dontdump,
+           advice_vmas(p, p + 4 * page));
+    /* Only private anonymous memory may be wiped; a hole is ENOMEM after
+     * the rest took the advice. */
+    long wipe_shared = advice_errno(madvise(shared, page, MADV_WIPEONFORK));
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/paludarium-advice-fork-%d", getpid());
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+    unlink(path);
+    if (fd < 0 || ftruncate(fd, page)) return 81;
+    char *file = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (file == MAP_FAILED) return 82;
+    long wipe_file = advice_errno(madvise(file, page, MADV_WIPEONFORK));
+    /* The program's initialized data is a private mapping of its file. */
+    long wipe_data = advice_errno(madvise(advice_data, page, MADV_WIPEONFORK));
+    printf("wipe-data=%ld\n", wipe_data);
+    long hole = advice_errno(madvise(guard, 2 * page, MADV_DONTDUMP));
+    long hole_dodump = advice_errno(madvise(guard, 2 * page, MADV_DODUMP));
+    printf("wipe-shared=%ld wipe-file=%ld hole=%ld hole-dodump=%ld vmas=%d\n", wipe_shared,
+           wipe_file, hole, hole_dodump, advice_vmas(p, p + 4 * page));
+    fflush(stdout);
+    pid_t child = fork();
+    if (child < 0) return 83;
+    if (child == 0) {
+        unsigned char vec;
+        long gone = mincore(p + page, page, &vec) ? -errno : 0;
+        int wiped = advice_status(p + 2 * page);
+        int vmas = advice_vmas(p, p + 4 * page);
+        printf("child: kept=%d gone=%ld wiped-status=%d wiped=%d dumpless=%d vmas=%d\n", p[0], gone,
+               wiped, p[2 * page], p[3 * page], vmas);
+        fflush(stdout);
+        _exit(0);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return 84;
+    printf("parent: kept=%d %d %d %d\n", p[0], p[page], p[2 * page], p[3 * page]);
+    /* Clearing every flag lets the pieces merge again. */
+    long dofork = advice_errno(madvise(p, 4 * page, MADV_DOFORK));
+    long keep = advice_errno(madvise(p, 4 * page, MADV_KEEPONFORK));
+    long dodump = advice_errno(madvise(p, 4 * page, MADV_DODUMP));
+    printf("dofork=%ld keeponfork=%ld dodump=%ld vmas=%d\n", dofork, keep, dodump,
+           advice_vmas(p, p + 4 * page));
+    return 0;
+}
 /* process_mrelease, as Linux master's: only the memory of a dying process
  * may be released; an exited one has none left to find (ESRCH), and a
  * reaped one is gone. */
@@ -20468,6 +20552,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "seccomp")) return seccomp_case(self);
     if (!strcmp(mode, "memfd-secret")) return memfd_secret_case();
     if (!strcmp(mode, "madvise-advice")) return madvise_advice_case();
+    if (!strcmp(mode, "madvise-fork")) return madvise_fork_case();
     if (!strcmp(mode, "mrelease")) return mrelease_case();
     if (!strcmp(mode, "seccomp-exec")) return seccomp_exec_case();
     if (!strcmp(mode, "seccomp-notify")) return seccomp_notify_case();
